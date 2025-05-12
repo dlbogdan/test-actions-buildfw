@@ -1,0 +1,11 @@
+.env
+.vscode
+.micropico
+# Ignore build outputs
+/output/
+*.tar.zlib
+*.json
+
+# Python
+__pycache__/
+*.pyc
