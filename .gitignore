@@ -2,7 +2,7 @@
 .vscode
 .micropico
 # Ignore build outputs
-/output/
+release/
 *.tar.zlib
 *.json
 
