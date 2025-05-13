@@ -386,6 +386,23 @@ class FirmwareUpdater:
         update_count = 0
         error_count = 0 # For tar extraction errors
 
+        # --- Check if update archive exists ---
+        try:
+            uos.stat(compressed_file_path)
+        except OSError as e:
+            if e.args[0] == 2: # ENOENT - No such file or directory
+                msg = f"Update archive {compressed_file_path} not found. Assuming already applied or download failed. Aborting apply phase."
+                if self.update_log_active: self._log_to_update_file(f"INFO: {msg}")
+                print(f"INFO: {msg}")
+                # self.error = msg # Optionally set error, or just return False for this specific case
+                return False # Nothing to apply
+            else:
+                # Different OSError, perhaps permissions or other issue
+                self.error = f"Error accessing update archive {compressed_file_path}: {str(e)}"
+                if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
+                print(f"ERROR: {self.error}")
+                return False
+
         self._log_to_update_file(f"Step 6: Applying update from {compressed_file_path}...")
         print(f"Step 6: Applying update from {compressed_file_path}...")
         try: self._mkdirs(extract_to_dir)
