@@ -220,7 +220,7 @@ class FirmwareUpdater:
         try:
             timestamp = utime.ticks_ms()
             with open(self.update_log_path, 'a') as f:
-                f.write(f"{timestamp} - {message}\\n")
+                f.write(f"{timestamp} - {message}\r\n")
         except Exception: # Catch all, pass silently
             pass # Don't disrupt main flow if logging fails
 
