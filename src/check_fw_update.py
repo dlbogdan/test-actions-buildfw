@@ -40,6 +40,7 @@ class FirmwareUpdater:
         # self._temp_metadata_path = '/releases.tmp.json' # No longer strictly needed for metadata
         self.update_log_path = '/update.log'
         self.update_log_active = False
+        self.pending_update_version = None # Added to store version for later update
 
     # def _read_base_url(self): # REMOVED - base_url and token now passed via __init__
     #     """Read the base_url from a firmware.json file."""
@@ -286,6 +287,7 @@ class FirmwareUpdater:
             print(f"Update available: {latest_version_str} (current: {self.current_version})")
             new_firmware_version = latest_version_str 
             release_to_download = latest_release
+            self.pending_update_version = new_firmware_version # Store for apply_update
 
             # --- START Update Log ---
             self.update_log_active = True
@@ -336,28 +338,15 @@ class FirmwareUpdater:
                 errmsg = f"Firmware download failed: {self.error if self.error else 'No hash or download error'}"
                 print(errmsg)
                 if self.update_log_active: self._log_to_update_file(f"ERROR: {errmsg}")
+                self.pending_update_version = None # Clear pending version on download error
                 return False
             self._log_to_update_file("Firmware download successful.")
 
             self._log_to_update_file("Step 4: Skipping checksum verification (not provided by GitHub API).")
             print("Step 4: Skipping checksum verification (not provided by GitHub API).")
 
-            if new_firmware_version:
-                self._log_to_update_file(f"Step 5: Updating version file to {new_firmware_version}...")
-                print(f"Step 5: Updating version file to {new_firmware_version}...")
-                try:
-                    with open('/version.txt', 'w') as vf:
-                        vf.write(new_firmware_version) 
-                    self._log_to_update_file("Version file updated successfully.")
-                    print("Version file updated successfully.")
-                    self.current_version = new_firmware_version
-                except Exception as e:
-                    self.error = f"Failed to update version file: {str(e)}"
-                    print(self.error)
-                    if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-            
-            self._log_to_update_file(f"Firmware update downloaded successfully to {self.firmware_download_path}")
-            print(f"Firmware update downloaded successfully to {self.firmware_download_path}")
+            self._log_to_update_file(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
+            print(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
             return True 
         
         return False
@@ -554,6 +543,31 @@ class FirmwareUpdater:
             if self.update_log_active: self._log_to_update_file(f"Update aborted due to overwrite failure: {self.error}")
             print(f"Update aborted due to overwrite failure: {self.error}")
             return False
+            
+        # --- Finalizing update: Update version file ---
+        if self.pending_update_version:
+            version_update_msg = f"Finalizing update: Writing version {self.pending_update_version} to /version.txt..."
+            if self.update_log_active: self._log_to_update_file(version_update_msg)
+            print(version_update_msg)
+            try:
+                with open('/version.txt', 'w') as vf:
+                    vf.write(self.pending_update_version)
+                self.current_version = self.pending_update_version
+                self.pending_update_version = None # Clear after successful write
+                if self.update_log_active: self._log_to_update_file("Version file updated successfully.")
+                print("Version file updated successfully.")
+            except Exception as e:
+                self.error = f"Critical error: Failed to update version file to {self.pending_update_version} after file system operations: {str(e)}"
+                if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
+                print(f"ERROR: {self.error}")
+                # This is a critical error post-update. Device might be in an inconsistent state.
+                # Consider what to do here. For now, we'll still proceed to reboot, but the version will be wrong.
+                # Alternatively, could try to restore backup, but that's complex.
+                # For now, log and continue to reboot if machine.reset() is active
+        else:
+            no_pending_ver_msg = "Skipping version file update: No pending version was set (this might be okay if update was aborted earlier)."
+            if self.update_log_active: self._log_to_update_file(no_pending_ver_msg)
+            print(no_pending_ver_msg)
             
         # --- Step 9: Reboot ---
         self._log_to_update_file("Step 9: System update successfully applied. Rebooting device...")
