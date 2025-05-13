@@ -542,7 +542,7 @@ class FirmwareUpdater:
         self._log_to_update_file("Step 9: System update successfully applied. Rebooting device...")
         print("Step 9: System update successfully applied. Rebooting device...")
         await asyncio.sleep(1) # Brief pause for logs to potentially flush
-        machine.reset()
+        #machine.reset()
         
         return True # This line will not be reached due to reset
 
@@ -672,7 +672,8 @@ class FirmwareUpdater:
         
         update_source_dir = "/update"
         try:
-            if not update_source_dir in uos.listdir('/'): # Check if /update exists
+            update_source_dir_name = update_source_dir.strip('/')
+            if not update_source_dir_name in uos.listdir('/'): # Check if /update exists
                  warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
                  if self.update_log_active: self._log_to_update_file(warn_msg)
                  print(warn_msg)
