@@ -67,23 +67,26 @@ async def check_update_on_boot():
         base_url=base_url,
         github_token=github_token
     )
-
-    logger.info("Boot: Starting firmware update check...")
-    try:
-        success = await updater.check_and_update()
-        if success:
-            if updater.error:
-                logger.info(f"Boot: Firmware check completed with message: {updater.error}")
-            elif not updater.is_download_done():
-                logger.info("Boot: Firmware is already up-to-date.")
+    # only check for updates if the device is connected to the internet and there is a flag in the config to do it.
+    if wifi_manager.is_connected() and config_manager.get("FIRMWARE", "CHECK_FOR_UPDATES", False):
+        logger.info("Boot: Starting firmware update check...")
+        try:
+            success = await updater.check_and_update()
+            if success:
+                if updater.error:
+                    logger.info(f"Boot: Firmware check completed with message: {updater.error}")
+                elif not updater.is_download_done():
+                    logger.info("Boot: Firmware is already up-to-date.")
+                else:
+                    logger.info(f"Boot: Firmware download successful. New firmware at: {updater.firmware_download_path}")
+                    await updater.apply_update()
+                    logger.info("Boot: Consider restarting the device to apply the update if not done automatically.")
             else:
-                logger.info(f"Boot: Firmware download successful. New firmware at: {updater.firmware_download_path}")
-                await updater.apply_update()
-                logger.info("Boot: Consider restarting the device to apply the update if not done automatically.")
-        else:
-            logger.error(f"Boot: Firmware update process failed: {updater.error if updater.error else 'Unknown reason'}")
-    except Exception as e:
-        logger.error(f"Boot: An exception occurred during firmware update check: {e}")
+                logger.error(f"Boot: Firmware update process failed: {updater.error if updater.error else 'Unknown reason'}")
+        except Exception as e:
+            logger.error(f"Boot: An exception occurred during firmware update check: {e}")
+    else:
+        logger.info("Boot: Skipping firmware update")
 
 # Run the update check on boot
 if __name__ == "__main__":
