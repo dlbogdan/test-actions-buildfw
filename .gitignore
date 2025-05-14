@@ -9,3 +9,4 @@ release/
 # Python
 __pycache__/
 *.pyc
+*.code-workspace

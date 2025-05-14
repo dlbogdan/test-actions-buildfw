@@ -1,0 +1,76 @@
+Pseudocode for FirmwareUpdater in check_fw_update.py
+
+Class: FirmwareUpdater
+  Constructor (__init__):
+    - _read_version()
+
+  Method: check_update() (async)
+    # Returns: (is_update_available, latest_version_str, latest_release_data)
+    - _fetch_release_metadata(base_url)
+      - _download_file(url, store_in_memory=True) # Handles HTTP GET, redirects, and content retrieval
+        - _parse_url()
+        - _make_http_request()
+        - _handle_redirect() [if needed]
+        - _process_response_headers()
+        - _download_content() # Reads stream into memory or file
+    - _parse_release_metadata(metadata_content_str) # Parses JSON
+    - _compare_versions(latest_version_str) # Compares semantic versions
+      - _parse_semver()
+      - _parse_semver()
+
+  Method: download_update(latest_release) (async)
+    # Downloads the update identified by check_update
+    - _find_firmware_asset(latest_release) # Locates firmware URL in release assets
+    - _download_firmware(firmware_url, firmware_filename)
+      - _download_file(firmware_url, store_in_memory=False) # Core download logic, saves to file
+        - (Calls _parse_url, _make_http_request, _handle_redirect, _process_response_headers, _download_content)
+
+  Method: apply_update() (async)
+    # Applies a previously downloaded update
+    - _check_update_archive_exists(compressed_file_path) # Verifies .tar.zlib exists
+    - _decompress_firmware(compressed_path, decompressed_path) (async) # Decompresses .zlib to .tar
+    - _extract_firmware(tar_path, extract_to_dir) (async) # Extracts .tar archive
+      - _mkdirs() # Creates destination directories
+      - Loop through tar entries:
+        - _process_tar_entry(tar, entry, extract_to_dir) (async) # Handles each tar entry
+          - _mkdirs() # Creates subdirectories if needed
+          # (Extracts file or creates directory based on entry type)
+    - _backup_existing_files() (async) # Backs up current system files
+      - _mkdirs() # Creates backup directory
+      - Loop through root items:
+        - _copy_item_recursive(source_path, dest_path) (async) # Copies files/dirs to backup
+          - _mkdirs() # Ensures destination paths exist
+          # (Recursively copies directory contents)
+    - _move_from_update_to_root() (async) # Moves new files from /update to /
+      - Loop through items in /update:
+        - _remove_dir_recursive() (async) [if destination is an existing directory]
+          # (Recursively removes directory contents before overwriting)
+        - uos.remove() [if destination is an existing file]
+        - uos.rename() # Moves new item to root
+      - _remove_dir_recursive("/update") (async) # Cleans up /update directory
+      - uos.remove() [for temporary files like .tar.zlib, .tmp.tar]
+    - _update_version_file() (async) # Writes new version to version.txt
+    - machine.reset() # Reboots device
+
+Helper methods used by the above (logic for these is now abstracted in the main flow):
+  - _read_version()
+  - _parse_semver(version)
+  - _parse_url(url)
+  - _make_http_request(host, path) (async)
+  - _handle_redirect(reader, writer) (async)
+  - _process_response_headers(reader) (async)
+  - _download_content(reader, store_in_memory, target_path, content_length) (async)
+  - _download_file(url, target_path, store_in_memory) (async) - Core download logic
+  - _mkdirs(path)
+  - _check_update_archive_exists(archive_path)
+  - _find_firmware_asset(release)
+  - _download_firmware(firmware_url, firmware_filename)
+  - _process_tar_entry(tar, entry, extract_to_dir) (async)
+  - _copy_item_recursive(source_path, dest_path) (async)
+  - _remove_dir_recursive(dir_path) (async)
+
+Note:
+- "(async)" indicates an asynchronous method.
+- Indentation suggests a calling relationship.
+- This pseudocode is simplified to show the main logical flow.
+- Specific low-level operations (like exact file I/O steps, stream processing) are abstracted within the described method actions. 

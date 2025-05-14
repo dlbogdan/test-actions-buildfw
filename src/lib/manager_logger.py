@@ -65,44 +65,54 @@ class Logger: #singleton
         if resetmachine:
             reset()
 
-    def error(self, message):
+    def error(self, message, log_to_file:bool=True):
         """Logs a non-fatal error to log.txt and tracks it for rate limiting."""
         print(f"ERROR: {message}")
         if self._message_server:
             self._message_server.send(f"ERROR: {message}")
-        self._log_to_file("ERROR", f"{message}")
+        if log_to_file:
+            self._log_to_file("ERROR", f"{message}")
         self._track_error_rate()
         self._add_to_history("ERROR", message)
 
-    def warning(self, message):
+    def warning(self, message, log_to_file:bool=False):
         """Logs a warning message to the history."""
         if self._debug_level>=1:
             print(f"WARNING: {message}")
             if self._message_server:
                  self._message_server.send(f"WARNING: {message}")
+        if log_to_file:
+            self._log_to_file("WARNING", f"{message}")
         self._add_to_history("WARNING", message)
 
-    def info(self, message):
+    def info(self, message, log_to_file:bool=False):
         """Logs an informational message."""
         if self._debug_level>=2:
             print(f"INFO: {message}")
             if self._message_server:
                 self._message_server.send(f"INFO: {message}")
+        if log_to_file:
+            self._log_to_file("INFO", f"{message}")
         #self._add_to_history("INFO", message) 
 
-    def debug(self, message):
+    def debug(self, message, log_to_file:bool=False):
         """Logs a debug message."""
         if self._debug_level>=3:
             print(f"DEBUG: {message}")
             if self._message_server:
                 self._message_server.send(f"DEBUG: {message}")
+        if log_to_file:
+            self._log_to_file("DEBUG", f"{message}")
 
-    def trace(self, message):
+    def trace(self, message, log_to_file:bool=False):
         """Logs a trace message."""
         if self._debug_level>=4:
             print(f"TRACE: {message}")
             if self._message_server:
                 self._message_server.send(f"TRACE: {message}")
+        if log_to_file:
+            self._log_to_file("TRACE", f"{message}")
+
 
     def _log_to_file(self,level, message):
         """Logs a message to the log file."""

@@ -18,16 +18,13 @@ CONFIG_FILE = "/config.json" # Standard config file name
 config_manager = ConfigManager(CONFIG_FILE)
 
 # async def async_connect_wifi(ssid, password): # REMOVED - WiFiManager will handle this
-#     wlan = network.WLAN(network.STA_IF)
-#     wlan.active(True)
-#     if not wlan.isconnected():
-#         print('Connecting to network...')
-#         wlan.connect(ssid, password)
-#         while not wlan.isconnected():
-#             await asyncio.sleep(1)
-#     print('Network config:', wlan.ifconfig())
 
 async def check_update_on_boot():
+    if not config_manager.get("FIRMWARE", "CHECK_FOR_UPDATES_ON_STARTUP", False):
+        logger.info("Boot: Skipping firmware update check on startup.")
+        return
+
+
     logger.info("Boot: Initializing WiFi connection process...")
     
     # Get WiFi credentials and device settings from ConfigManager
@@ -67,26 +64,31 @@ async def check_update_on_boot():
         base_url=base_url,
         github_token=github_token
     )
-    # only check for updates if the device is connected to the internet and there is a flag in the config to do it.
-    if wifi_manager.is_connected() and config_manager.get("FIRMWARE", "CHECK_FOR_UPDATES", False):
-        logger.info("Boot: Starting firmware update check...")
-        try:
-            success = await updater.check_and_update()
-            if success:
-                if updater.error:
-                    logger.info(f"Boot: Firmware check completed with message: {updater.error}")
-                elif not updater.is_download_done():
-                    logger.info("Boot: Firmware is already up-to-date.")
+    logger.info("Boot: Starting firmware update check...")
+    try:
+        is_available, version_str, release_info = await updater.check_update()
+
+        if updater.error:
+            logger.error(f"Boot: Error during firmware check: {updater.error}")
+        elif is_available:
+            logger.info(f"Boot: Update to version {version_str} is available. Proceeding to download.")
+            if release_info: # Ensure we have release_info to proceed
+                download_success = await updater.download_update(release_info)
+                if download_success:
+                    logger.info(f"Boot: Firmware download successful. New firmware at: {updater.firmware_download_path}. Proceeding to apply.")
+                    await updater.apply_update() # This includes the reboot
+                    # The script might not reach here if apply_update reboots.
+                    logger.info("Boot: Firmware update applied. Device should be rebooting.")
                 else:
-                    logger.info(f"Boot: Firmware download successful. New firmware at: {updater.firmware_download_path}")
-                    await updater.apply_update()
-                    logger.info("Boot: Consider restarting the device to apply the update if not done automatically.")
+                    logger.error(f"Boot: Firmware download failed: {updater.error if updater.error else 'Unknown reason'}")
             else:
-                logger.error(f"Boot: Firmware update process failed: {updater.error if updater.error else 'Unknown reason'}")
-        except Exception as e:
-            logger.error(f"Boot: An exception occurred during firmware update check: {e}")
-    else:
-        logger.info("Boot: Skipping firmware update")
+                logger.error("Boot: Update available but missing release information to download.")
+        else:
+            logger.info(f"Boot: Firmware is already up-to-date (or no newer version found). Current: {updater.current_version}, Latest checked: {version_str}")
+
+    except Exception as e:
+        logger.error(f"Boot: An exception occurred during firmware update check: {e}")
+
 
 # Run the update check on boot
 if __name__ == "__main__":

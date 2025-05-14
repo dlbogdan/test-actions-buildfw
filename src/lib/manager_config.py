@@ -79,11 +79,15 @@ class ConfigManager:
         if isinstance(section_dict, dict) and key in section_dict:
             return section_dict[key] # Return existing value (already typed)
         else:
-            # Section or key missing, use default
-            logger.info(f"Config key '{section}.{key}' not found. Setting default: {repr(default)}")
-            # Set the default value (with its original type) and save
-            self.set(section, key, default) # set_value handles save and notification
-            return default
+            if default is not None:
+                # Section or key missing, use default
+                logger.info(f"Config key '{section}.{key}' not found. Setting default: {repr(default)}")
+                # Set the default value (with its original type) and save
+                self.set(section, key, default) # set_value handles save and notification
+                return default
+            else:
+                logger.error(f"Config key '{section}.{key}' not found and no default provided.")
+                raise ValueError(f"Config key '{section}.{key}' not found and no default provided. Impossible to proceed.")
 
     def set(self, section: str, key: str, value: Any):
         """Sets the value (preserving type), saves config, and notifies listeners if changed."""

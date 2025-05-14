@@ -11,16 +11,8 @@ import deflate # Added for decompression
 import utarfile  # Added for tar extraction
 import utime # Added for update log timestamps
 import machine # Added for machine.reset()
+from lib.manager_logger import Logger # Import the Logger
 
-# async def async_connect_wifi(ssid, password): # REMOVED - WiFiManager will handle this
-#     wlan = network.WLAN(network.STA_IF)
-#     wlan.active(True)
-#     if not wlan.isconnected():
-#         print('Connecting to network...')
-#         wlan.connect(ssid, password)
-#         while not wlan.isconnected():
-#             await asyncio.sleep(1)
-#     print('Network config:', wlan.ifconfig())
 
 class FirmwareUpdater:
     def __init__(self, device_model, base_url, github_token="", chunk_size=2048, max_redirects=10):
@@ -30,6 +22,7 @@ class FirmwareUpdater:
         self.current_version = self._read_version()
         self.chunk_size = chunk_size
         self.max_redirects = max_redirects
+        self.logger = Logger() # Initialize logger instance
         
         self.total_size = 0
         self.bytes_read = 0
@@ -38,21 +31,10 @@ class FirmwareUpdater:
         self.download_started = False
         self.firmware_download_path = '/update.tar.zlib'
         # self._temp_metadata_path = '/releases.tmp.json' # No longer strictly needed for metadata
-        self.update_log_path = '/update.log'
-        self.update_log_active = False
+        # self.update_log_path = '/update.log' # REMOVED
+        # self.update_log_active = False # REMOVED
         self.pending_update_version = None # Added to store version for later update
 
-    # def _read_base_url(self): # REMOVED - base_url and token now passed via __init__
-    #     """Read the base_url from a firmware.json file."""
-    #     try:
-    #         with open('/firmware.json', 'r') as f:
-    #             config = ujson.load(f)
-    #             self.github_token = config.get('github_token', '') # Now set in __init__
-    #             return config.get('base_url', 'https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases')
-    #     except Exception as e:
-    #         print(f"Error reading firmware config: {e}")
-    #         self.github_token = '' # Now set in __init__
-    #         return 'https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases'
 
     def _read_version(self):
         """Read the current version from a version file."""
@@ -60,7 +42,7 @@ class FirmwareUpdater:
             with open('/version.txt', 'r') as f:
                 return f.read().strip()
         except Exception as e:
-            print(f"Error reading version file: {e}")
+            self.logger.warning(f"Error reading version file, defaulting to 0.0.0", log_to_file=True)
             return "0.0.0"  # Default to a low version if file not found
 
     def _parse_semver(self, version):
@@ -70,6 +52,120 @@ class FirmwareUpdater:
             return (major, minor, patch)
         except ValueError:
             raise ValueError(f"Invalid version format: {version}")
+
+    def _parse_url(self, url):
+        """Parse URL into host and path components."""
+        if not isinstance(url, str):
+            raise ValueError(f"Invalid URL type: {type(url)}")
+
+        if not url.startswith("https://"):
+            self.logger.error(f"Warning: only HTTPS URLs are supported: {url}", log_to_file=True)
+        
+        url_no_proto = url[8:]  # Remove https://
+        host_end_index = url_no_proto.find('/')
+        if host_end_index == -1:
+            host = url_no_proto
+            path = "/"
+        else:
+            host = url_no_proto[:host_end_index]
+            path = url_no_proto[host_end_index:]
+
+        if not host:
+            raise ValueError(f"Could not extract host from URL: {url}")
+            
+        return host, path
+            
+    async def _make_http_request(self, host, path):
+        """Make an HTTPS request and return the connection and response status."""
+        port = 443
+        
+        self.logger.info(f'Connecting to {host}:{port} for path {path[:50]}...', log_to_file=True)
+        reader, writer = await asyncio.open_connection(host, port, ssl=True)
+        
+        headers = f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: MicroPython-Firmware-Updater/1.0\r\nConnection: close\r\n'
+        if self.github_token:
+            headers += f'Authorization: token {self.github_token}\r\n'
+        headers += '\r\n'
+        
+        writer.write(headers.encode())
+        await writer.drain()
+
+        status_line = await reader.readline()
+        return reader, writer, status_line
+        
+    async def _handle_redirect(self, reader, writer):
+        """Handle HTTP redirect and return the new location."""
+        location = None
+        while True:
+            header_line = await reader.readline()
+            if header_line == b'\r\n': 
+                break
+            if header_line.startswith(b'Location:'):
+                location = header_line.split(b': ')[1].decode().strip()
+        
+        writer.close()
+        await writer.wait_closed()
+        return location
+        
+    async def _process_response_headers(self, reader):
+        """Process HTTP response headers and return content length."""
+        content_length = 0
+        while True:
+            header_line = await reader.readline()
+            if header_line == b'\r\n': 
+                break
+            if header_line.startswith(b'Content-Length:'):
+                content_length = int(header_line.split(b':')[1].strip())
+        
+        return content_length
+        
+    async def _download_content(self, reader, store_in_memory, target_path, content_length):
+        """Download content from the HTTP response."""
+        hash_obj = hashlib.sha256()
+        mem_buffer = bytearray() if store_in_memory else None
+        file_handle = None
+        
+        if not store_in_memory:
+            if not target_path or not isinstance(target_path, str):
+                raise ValueError("Invalid target_path for file download")
+            file_handle = open(target_path, 'wb')
+        
+        self.total_size = content_length
+        self.bytes_read = 0
+        
+        try:
+            remaining = content_length
+            while remaining > 0:
+                chunk = await reader.read(min(self.chunk_size, remaining))
+                if not chunk: 
+                    break
+                hash_obj.update(chunk)
+                if store_in_memory and mem_buffer is not None:
+                    mem_buffer.extend(chunk)
+                elif file_handle:
+                    file_handle.write(chunk)
+                self.bytes_read += len(chunk)
+                remaining -= len(chunk)
+                gc.collect()
+                await asyncio.sleep(0)
+                
+            def hexdigest(data):
+                try: 
+                    return data.hexdigest()
+                except Exception: 
+                    return ''.join('{:02x}'.format(byte) for byte in data.digest())
+                    
+            computed_hash = hexdigest(hash_obj) if content_length > 0 else "NO_CONTENT_HASH"
+            
+            if store_in_memory and mem_buffer is not None:
+                content_str = mem_buffer.decode('utf-8')
+                return content_str, computed_hash
+            else:
+                return None, computed_hash
+                
+        finally:
+            if file_handle:
+                file_handle.close()
 
     async def _download_file(self, url, target_path, store_in_memory: bool = False):
         """Core download logic, assuming HTTPS. Optionally stores in memory."""
@@ -82,54 +178,13 @@ class FirmwareUpdater:
         current_url = url 
         redirect_count = 0
         
-        mem_buffer = bytearray() if store_in_memory else None
-        file_handle = None
-
         try:
             while redirects > 0:
-                if not isinstance(current_url, str):
-                    raise ValueError(f"Invalid URL type: {type(current_url)}")
-
-                if not current_url.startswith("https://"):
-                    print(f"Warning: URL does not start with https:// - {current_url}")
-                
-                url_no_proto = current_url[8:]
-                host_end_index = url_no_proto.find('/')
-                if host_end_index == -1:
-                    host = url_no_proto
-                    path = "/"
-                else:
-                    host = url_no_proto[:host_end_index]
-                    path = url_no_proto[host_end_index:]
-
-                if not host:
-                    raise ValueError(f"Could not extract host from URL: {current_url}")
-
-                port = 443
-                
-                print(f'Connecting to {host}:{port} for {target_path if not store_in_memory else "memory buffer"} (URL: {current_url[:70]}...)')
-                reader, writer = await asyncio.open_connection(host, port, ssl=True)
-                
-                headers = f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: MicroPython-Firmware-Updater/1.0\r\nConnection: close\r\n'
-                if hasattr(self, 'github_token') and self.github_token:
-                    headers += f'Authorization: token {self.github_token}\r\n'
-                headers += '\r\n'
-                request = headers
-                writer.write(request.encode())
-                await writer.drain()
-
-                status_line = await reader.readline()
+                host, path = self._parse_url(current_url)
+                reader, writer, status_line = await self._make_http_request(host, path)
                 
                 if status_line.startswith(b'HTTP/1.1 301') or status_line.startswith(b'HTTP/1.1 302'):
-                    location = None
-                    temp_header_line = b''
-                    while True:
-                        temp_header_line = await reader.readline()
-                        if temp_header_line == b'\r\n': break
-                        if temp_header_line.startswith(b'Location:'):
-                            location = temp_header_line.split(b': ')[1].decode().strip()
-                    writer.close()
-                    await writer.wait_closed()
+                    location = await self._handle_redirect(reader, writer)
                     redirect_count += 1
                     current_url = location 
                     redirects -= 1
@@ -141,14 +196,7 @@ class FirmwareUpdater:
                     await writer.wait_closed()
                     raise ValueError(f'Unexpected response: {status_line.decode().strip()}')
 
-                content_length = 0
-                temp_header_line = b''
-                while True:
-                    temp_header_line = await reader.readline()
-                    if temp_header_line == b'\r\n': break 
-                    if temp_header_line.startswith(b'Content-Length:'):
-                        content_length = int(temp_header_line.split(b':')[1].strip())
-                        self.total_size = content_length
+                content_length = await self._process_response_headers(reader)
                 
                 if content_length == 0 and not (status_line.startswith(b'HTTP/1.1 204')):
                     is_metadata_download = store_in_memory
@@ -159,71 +207,29 @@ class FirmwareUpdater:
 
                 self.download_started = True
                 gc.collect()
-                hash_obj = hashlib.sha256()
-
-                def hexdigest(data):
-                    try: return data.hexdigest()
-                    except Exception: return ''.join('{:02x}'.format(byte) for byte in data.digest())
-
-                if not store_in_memory:
-                    if not target_path or not isinstance(target_path, str):
-                        raise ValueError("Invalid target_path for file download")
-                    file_handle = open(target_path, 'wb')
                 
-                remaining = content_length
-                while remaining > 0:
-                    chunk = await reader.read(min(self.chunk_size, remaining))
-                    if not chunk: break
-                    hash_obj.update(chunk)
-                    if store_in_memory and mem_buffer is not None:
-                        mem_buffer.extend(chunk)
-                    elif file_handle:
-                        file_handle.write(chunk)
-                    self.bytes_read += len(chunk)
-                    remaining -= len(chunk)
-                    gc.collect()
-                    await asyncio.sleep(0)
+                content_str, computed_hash = await self._download_content(
+                    reader, store_in_memory, target_path, content_length)
                 
-                if file_handle:
-                    file_handle.close()
-                    file_handle = None
-
                 writer.close()
                 await writer.wait_closed()
                 self.download_done = True
                 
-                computed_hash = hexdigest(hash_obj) if content_length > 0 else "NO_CONTENT_HASH"
-                
-                content_str = None
-                if store_in_memory and mem_buffer is not None:
-                    content_str = mem_buffer.decode('utf-8')
-                
-                return content_str, computed_hash
+                return (content_str, computed_hash)
 
             if redirects == 0:
                  raise ValueError('Maximum redirects exceeded after loop completion')
 
         except Exception as e:
             self.error = f"Download failed for {url}: {str(e)}"
-            print(self.error)
-            if file_handle: 
-                file_handle.close()
+            self.logger.error(f"FirmwareUpdater: {self.error}")
             try:
                 if 'writer' in locals() and not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
-            except Exception: pass 
+            except Exception: 
+                pass 
             return None, None 
-
-    def _log_to_update_file(self, message):
-        if not self.update_log_active:
-            return
-        try:
-            timestamp = utime.ticks_ms()
-            with open(self.update_log_path, 'a') as f:
-                f.write(f"{timestamp} - {message}\r\n")
-        except Exception: # Catch all, pass silently
-            pass # Don't disrupt main flow if logging fails
 
     def percent_complete(self):
         if not self.download_started or self.total_size == 0:
@@ -233,123 +239,207 @@ class FirmwareUpdater:
     def is_download_done(self):
         return self.download_done
 
-    async def check_and_update(self):
-        self.error = None 
-        release_to_download = None 
-        new_firmware_version = None
+    async def _fetch_release_metadata(self, metadata_url):
+        """Fetch release metadata from the provided URL."""
+        self.logger.info("Fetching latest release metadata...", log_to_file=True)
         
-        print("Step 1: Fetching latest release metadata...")
-        metadata_url = self.base_url
-        
-        # Safely unpack result from _download_file
-        metadata_content_str, metadata_hash = None, None # Initialize
-        download_result = await self._download_file(metadata_url, target_path=None, store_in_memory=True)
-        if download_result is not None: # Check if the result itself is not None
+        # Download metadata
+        download_result = await self._download_file(
+            metadata_url, target_path=None, store_in_memory=True)
+            
+        # Unpack download result
+        metadata_content_str, metadata_hash = None, None
+        if download_result is not None:
             metadata_content_str, metadata_hash = download_result
-        # If download_result was None (should not happen with current _download_file error handling, but defensive)
-        # or if metadata_content_str is None after unpacking, the next check will catch it.
-        
+            
         if self.error or not metadata_content_str:
-            print(f"Failed to download latest release metadata: {self.error if self.error else 'No content or download error'}")
-            # No update log active yet, so no log write here
-            return False
+            error_msg = f"Failed to download latest release metadata: {self.error if self.error else 'No content or download error'}"
+            self.logger.error(error_msg, log_to_file=True)
+            return None
+            
+        return metadata_content_str
         
-        print("Step 2: Parsing latest release metadata and checking version...")
+    def _parse_release_metadata(self, metadata_content_str):
+        """Parse metadata and check if a newer version is available."""
+        self.logger.info("Parsing latest release metadata and checking version...", log_to_file=True)
+        
         try:
-            latest_release = ujson.loads(metadata_content_str) 
+            latest_release = ujson.loads(metadata_content_str)
 
             if not isinstance(latest_release, dict):
                 self.error = "Latest release metadata is not a valid JSON object."
-                print(self.error)
-                return False
+                self.logger.error(self.error, log_to_file=True)
+                return None
             
             if not latest_release: 
                 self.error = "No latest release found (empty or invalid response)."
-                print(self.error)
-                return False
+                self.logger.error(self.error, log_to_file=True)
+                return None
 
             latest_version_str = latest_release.get("tag_name", "0.0.0")
             if not latest_version_str or latest_version_str == "0.0.0":
                  self.error = "Latest release is missing version info (tag_name)."
-                 print(self.error)
-                 return False
+                 self.logger.error(self.error, log_to_file=True)
+                 return None
                  
             if latest_version_str.startswith('v'):
                 latest_version_str = latest_version_str[1:]
-
+                
+            return latest_release, latest_version_str
+                
+        except Exception as e:
+            self.error = f"Latest release metadata processing error: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return None
+    
+    def _compare_versions(self, latest_version_str):
+        """Compare current and latest versions to determine if update is needed."""
+        try:
             current_semver = self._parse_semver(self.current_version)
             latest_semver = self._parse_semver(latest_version_str)
 
             if latest_semver <= current_semver:
-                print(f"Device is up-to-date. Current: {self.current_version}, Latest available: {latest_version_str}")
-                return True 
-
-            print(f"Update available: {latest_version_str} (current: {self.current_version})")
-            new_firmware_version = latest_version_str 
-            release_to_download = latest_release
-            self.pending_update_version = new_firmware_version # Store for apply_update
-
-            # --- START Update Log ---
-            self.update_log_active = True
-            try:
-                uos.remove(self.update_log_path) # Clear old log
-            except OSError:
-                pass # File didn't exist, that's fine
-            self._log_to_update_file(f"Update available: Local v{self.current_version} -> Remote v{latest_version_str}")
-            self._log_to_update_file(f"Release Name: {release_to_download.get('name', 'N/A')}, Tag: {release_to_download.get('tag_name', 'N/A')}")
-            # --- END Update Log ---
-
+                self.logger.info(f"Device is up-to-date. Current: {self.current_version}, Latest available: {latest_version_str}", log_to_file=True)
+                return False
+                
+            self.logger.info(f"Update available: {latest_version_str} (current: {self.current_version})", log_to_file=True)
+            return True
+            
         except Exception as e:
-            self.error = f"Latest release metadata processing error: {str(e)}"
-            print(self.error)
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
+            self.error = f"Version comparison error: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+            
+    def _find_firmware_asset(self, release):
+        """Find the firmware asset in the release assets."""
+        assets = release.get("assets", [])
+        firmware_url = None
+        firmware_filename = None
+
+        for asset in assets:
+            if asset.get("name", "").endswith("firmware.tar.zlib"):
+                firmware_url = asset.get("browser_download_url")
+                firmware_filename = asset.get("name")
+                break
+
+        if not firmware_url:
+             self.error = "No firmware asset (firmware.tar.zlib) found in the latest release."
+             self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+             return None, None
+             
+        return firmware_url, firmware_filename
+        
+    async def _download_firmware(self, firmware_url, firmware_filename):
+        """Download the firmware file."""
+        self.logger.info(f"Downloading firmware '{firmware_filename}' to {self.firmware_download_path}...", log_to_file=True)
+        
+        self.download_done = False 
+        self.download_started = False
+        self.bytes_read = 0
+        self.total_size = 0
+        
+        firmware_download_result = await self._download_file(
+            firmware_url, self.firmware_download_path, store_in_memory=False)
+            
+        firmware_content_str, computed_sha256 = None, None 
+        if firmware_download_result is not None:
+            firmware_content_str, computed_sha256 = firmware_download_result
+
+        if self.error or not computed_sha256:
+            errmsg = f"Firmware download failed: {self.error if self.error else 'No hash or download error'}"
+            self.logger.error(f"FirmwareUpdater: {errmsg}", log_to_file=True)
+            self.pending_update_version = None  # Clear pending version on download error
+            return False
+            
+        self.logger.info("Firmware download successful.", log_to_file=True)
+        return True
+
+    async def check_update(self):
+        """Checks if a new firmware update is available without downloading.
+        Returns:
+            tuple: (is_update_available, latest_version_str, latest_release_data)
+                   is_update_available (bool): True if an update is available.
+                   latest_version_str (str | None): The version string of the latest release.
+                   latest_release_data (dict | None): The metadata of the latest release.
+        """
+        self.error = None
+        self.logger.info("Checking for firmware updates (metadata only)...", log_to_file=True)
+
+        # Step 1: Fetch release metadata
+        metadata_content_str = await self._fetch_release_metadata(self.base_url)
+        if not metadata_content_str:
+            self.logger.error(f"Failed to fetch metadata: {self.error}", log_to_file=True)
+            return False, None, None
+
+        # Step 2: Parse release metadata
+        parse_result = self._parse_release_metadata(metadata_content_str)
+        if not parse_result:
+            self.logger.error(f"Failed to parse metadata: {self.error}", log_to_file=True)
+            return False, None, None
+
+        latest_release, latest_version_str = parse_result
+
+        # Step 3: Compare versions
+        is_newer_available = self._compare_versions(latest_version_str)
+        if self.error: # Error during comparison
+            self.logger.error(f"FirmwareUpdater: Version comparison failed: {self.error}", log_to_file=True)
+            return False, latest_version_str, latest_release # Still return version and release if comparison itself failed
+
+        if is_newer_available:
+            self.logger.info(f"Update available: Current {self.current_version}, Latest {latest_version_str}", log_to_file=True)
+            return True, latest_version_str, latest_release
+        else:
+            self.logger.info(f"No new update available. Current: {self.current_version}, Latest: {latest_version_str}", log_to_file=True)
+            return False, latest_version_str, latest_release
+
+    async def download_update(self, latest_release):
+        """Downloads the firmware update if one is specified by latest_release data."""
+        self.error = None
+        if not latest_release or not isinstance(latest_release, dict):
+            self.error = "Invalid or missing latest_release data for download."
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
 
-        if release_to_download:
-            assets = release_to_download.get("assets", [])
-            firmware_url = None
-            firmware_filename = None
-
-            for asset in assets:
-                if asset.get("name", "").endswith("firmware.tar.zlib"):
-                    firmware_url = asset.get("browser_download_url")
-                    firmware_filename = asset.get("name")
-                    break
-
-            if not firmware_url:
-                 self.error = "No firmware asset (firmware.tar.zlib) found in the latest release."
-                 print(self.error)
-                 if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-                 return False
-
-            print(f"Step 3: Downloading firmware '{firmware_filename}' to {self.firmware_download_path}...")
-            
-            self.download_done = False 
-            self.download_started = False
-            self.bytes_read = 0
-            self.total_size = 0
-            
-            firmware_download_result = await self._download_file(firmware_url, self.firmware_download_path, store_in_memory=False)
-            firmware_content_str, computed_sha256 = None, None 
-            if firmware_download_result is not None:
-                firmware_content_str, computed_sha256 = firmware_download_result
-
-            if self.error or not computed_sha256:
-                errmsg = f"Firmware download failed: {self.error if self.error else 'No hash or download error'}"
-                print(errmsg)
-                if self.update_log_active: self._log_to_update_file(f"ERROR: {errmsg}")
-                self.pending_update_version = None # Clear pending version on download error
-                return False
-            self._log_to_update_file("Firmware download successful.")
-
-            self._log_to_update_file("Step 4: Skipping checksum verification (not provided by GitHub API).")
-            print("Step 4: Skipping checksum verification (not provided by GitHub API).")
-
-            self._log_to_update_file(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
-            print(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
-            return True 
+        latest_version_str = latest_release.get("tag_name", "0.0.0")
+        if latest_version_str.startswith('v'):
+            latest_version_str = latest_version_str[1:]
         
-        return False
+        # Store the new version for apply_update, assuming download will be successful
+        # This might be better placed after successful download.
+        self.pending_update_version = latest_version_str
+
+        # --- START Update Log (for download phase) ---
+        # self.update_log_active = True # REMOVED
+        # try: # REMOVED - uos.remove(self.update_log_path)
+            # uos.remove(self.update_log_path) 
+        # except OSError:
+            # pass 
+            
+        self.logger.info(f"Preparing to download update: Local v{self.current_version} -> Remote v{latest_version_str}", log_to_file=True)
+        self.logger.info(f"Release Name: {latest_release.get('name', 'N/A')}, Tag: {latest_release.get('tag_name', 'N/A')}", log_to_file=True)
+        # --- END Update Log ---
+
+        # Find firmware asset from the provided release data
+        firmware_url, firmware_filename = self._find_firmware_asset(latest_release)
+        if not firmware_url:
+            # self.error is set by _find_firmware_asset
+            self.pending_update_version = None # Clear if asset finding fails
+            return False
+
+        # Download firmware
+        download_success = await self._download_firmware(firmware_url, firmware_filename)
+        if not download_success:
+            # self.error is set by _download_firmware
+            self.pending_update_version = None # Clear if download fails
+            return False
+            
+        # Checksum verification is skipped as per original logic
+        self.logger.info("Skipping checksum verification (not provided by GitHub API).", log_to_file=True)
+        print("Skipping checksum verification (not provided by GitHub API).")
+        
+        self.logger.info(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.", log_to_file=True)
+        print(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
+        return True
 
     def _mkdirs(self, path):
         current_path = ""
@@ -367,215 +457,249 @@ class FirmwareUpdater:
             except OSError as e:
                 if e.args[0] != 17: raise 
 
-    async def apply_update(self):
-        self.error = None
-        compressed_file_path = self.firmware_download_path
-        decompressed_tar_path = "/update.tmp.tar"
-        extract_to_dir = "/update"
-        update_count = 0
-        error_count = 0 # For tar extraction errors
-
-        # --- Check if update archive exists ---
+    def _check_update_archive_exists(self, archive_path):
+        """Check if the update archive exists."""
         try:
-            uos.stat(compressed_file_path)
+            uos.stat(archive_path)
+            return True
         except OSError as e:
-            if e.args[0] == 2: # ENOENT - No such file or directory
-                msg = f"Update archive {compressed_file_path} not found. Assuming already applied or download failed. Aborting apply phase."
-                if self.update_log_active: self._log_to_update_file(f"INFO: {msg}")
+            if e.args[0] == 2:  # ENOENT - No such file or directory
+                msg = f"Update archive {archive_path} not found. Assuming already applied or download failed. Aborting apply phase."
+                self.logger.info(f"FirmwareUpdater: {msg}", log_to_file=True)
                 print(f"INFO: {msg}")
-                # self.error = msg # Optionally set error, or just return False for this specific case
-                return False # Nothing to apply
+                return False
             else:
                 # Different OSError, perhaps permissions or other issue
-                self.error = f"Error accessing update archive {compressed_file_path}: {str(e)}"
-                if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
+                self.error = f"Error accessing update archive {archive_path}: {str(e)}"
+                self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
                 print(f"ERROR: {self.error}")
-                return False
-
-        self._log_to_update_file(f"Step 6: Applying update from {compressed_file_path}...")
-        print(f"Step 6: Applying update from {compressed_file_path}...")
-        try: self._mkdirs(extract_to_dir)
-        except Exception as e: 
-            self.error = f"Directory creation failed for {extract_to_dir}: {str(e)}"; print(self.error)
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-            return False
-
-        # Decompression step
-        self._log_to_update_file(f"Decompressing {compressed_file_path} to {decompressed_tar_path}...")
-        print(f"Decompressing {compressed_file_path} to {decompressed_tar_path}...")
+                raise  # Re-raise to be caught by caller
+    
+    async def _decompress_firmware(self, compressed_path, decompressed_path):
+        """Decompress the zlib-compressed firmware file."""
+        self.logger.info(f"Decompressing {compressed_path} to {decompressed_path}...", log_to_file=True)
+        print(f"Decompressing {compressed_path} to {decompressed_path}...")
+        
         f_zlib = None
         d_stream = None
         f_tar_out = None
-        decompression_success = False
+        
         try:
-            f_zlib = open(compressed_file_path, "rb")
+            f_zlib = open(compressed_path, "rb")
             # Using positional arguments for DeflateIO: stream, format, wbits
             # format=deflate.ZLIB, wbits=0 (for auto window size from header)
             d_stream = deflate.DeflateIO(f_zlib, deflate.ZLIB, 0) 
-            f_tar_out = open(decompressed_tar_path, "wb")
+            f_tar_out = open(decompressed_path, "wb")
+            
             chunk_size = 512 
             while True:
                 chunk = d_stream.read(chunk_size)
                 if not chunk: break
                 f_tar_out.write(chunk)
                 await asyncio.sleep(0) 
-            decompression_success = True
-            self._log_to_update_file("Decompression successful.")
+                
+            self.logger.info("Decompression successful.", log_to_file=True)
             print("Decompression successful.")
+            return True
+            
         except Exception as e:
-            self.error = f"Decompression failed: {str(e)}"; print(self.error)
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
+            self.error = f"Decompression failed: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+            
         finally:
             if d_stream: 
                 try: d_stream.close() 
-                except Exception as e_close: print(f"Error closing d_stream: {e_close}")
+                except Exception as e_close: 
+                    print(f"Error closing d_stream: {e_close}")
             if f_tar_out:
                 try: f_tar_out.close()
-                except Exception as e_close: print(f"Error closing f_tar_out: {e_close}")
+                except Exception as e_close: 
+                    print(f"Error closing f_tar_out: {e_close}")
             if f_zlib:
                 try: f_zlib.close()
-                except Exception as e_close: print(f"Error closing f_zlib: {e_close}")
-        
-        if not decompression_success:
-            try: uos.remove(decompressed_tar_path) 
-            except OSError: pass
-            if self.update_log_active: self._log_to_update_file("Decompression failed, cannot proceed to extraction.")
-            return False
-
-        # Extraction step (using logic from user's provided example)
-        self._log_to_update_file(f"Extracting {decompressed_tar_path} to {extract_to_dir}...")
-        print(f"Extracting {decompressed_tar_path} to {extract_to_dir}...")
-        tar = None
+                except Exception as e_close: 
+                    print(f"Error closing f_zlib: {e_close}")
+    
+    async def _process_tar_entry(self, tar, entry, extract_to_dir):
+        """Process a single tar entry."""
         try:
-            tar = utarfile.TarFile(name=decompressed_tar_path)
-            for entry in tar: # Iterate through members
-                try:
-                    if not entry: continue
+            if not entry: 
+                return False, False  # not processed, no error
+                
+            file_name = entry.name
+            
+            # Silently skip PaxHeader entries
+            if "@PaxHeader" in file_name:
+                return False, False  # not processed, no error
+                
+            self.logger.info(f"Processing tar entry: {file_name}", log_to_file=True)
+            print(f"Processing tar entry: {file_name}")
+            
+            if file_name.startswith('/') or '..' in file_name or file_name.startswith('.'):
+                self.logger.warning(f"Skipping potentially unsafe path: {file_name}", log_to_file=True)
+                return False, False  # not processed, no error
+                
+            target_path = f"{extract_to_dir}/{file_name}"
+            
+            if entry.type == utarfile.DIRTYPE:
+                self._mkdirs(target_path)
+                self.logger.info(f"Created directory (from tar): {target_path}", log_to_file=True)
+                return True, False  # processed, no error
+                
+            else:  # Is a file
+                parent_dir = target_path.rpartition('/')[0]
+                if parent_dir: 
+                    self._mkdirs(parent_dir)  # Ensure parent dir exists
                         
-                    file_name = entry.name
+                f_entry = tar.extractfile(entry)
+                if f_entry:
+                    with open(target_path, "wb") as outfile:
+                        while True:
+                            chunk = f_entry.read(1024)  # Read in chunks
+                            if not chunk: break
+                            outfile.write(chunk)
+                    self.logger.info(f"Extracted file: {target_path}", log_to_file=True)
+                    return True, False  # processed, no error
+                else:
+                    self.logger.warning(f"Could not extract file entry: {file_name}", log_to_file=True)
+                    return False, True  # not processed, error
                     
-                    # Silently skip PaxHeader entries
-                    if "@PaxHeader" in file_name:
-                        continue
-                        
-                    self._log_to_update_file(f"Processing tar entry: {file_name}")
-                    print(f"Processing tar entry: {file_name}")
-                    
-                    if file_name.startswith('/') or '..' in file_name or file_name.startswith('.'):
-                        self._log_to_update_file(f"Skipping potentially unsafe path: {file_name}")
-                        print(f"Skipping potentially unsafe path: {file_name}")
-                        continue
-                        
-                    target_path = f"{extract_to_dir}/{file_name}"
-                    
-                    if entry.type == utarfile.DIRTYPE:
-                        self._mkdirs(target_path)
-                        self._log_to_update_file(f"Created directory (from tar): {target_path}")
-                        print(f"Created directory (from tar): {target_path}")
-                    else: # Is a file
-                        parent_dir = target_path.rpartition('/')[0]
-                        if parent_dir: self._mkdirs(parent_dir) # Ensure parent dir exists
-                                
-                        f_entry = tar.extractfile(entry)
-                        if f_entry:
-                            with open(target_path, "wb") as outfile:
-                                while True:
-                                    chunk = f_entry.read(1024) # Read in chunks
-                                    if not chunk: break
-                                    outfile.write(chunk)
-                            update_count += 1
-                            self._log_to_update_file(f"Extracted file: {target_path}")
-                            print(f"Extracted file: {target_path}")
-                        else:
-                            self._log_to_update_file(f"Could not extract file entry: {file_name}")
-                            print(f"Could not extract file entry: {file_name}")
-                            error_count +=1
-                except Exception as e_entry:
-                    errmsg_entry = f"Error processing tar entry '{entry.name if entry else "UNKNOWN"}': {e_entry}"
-                    print(errmsg_entry)
-                    if self.update_log_active: self._log_to_update_file(f"ERROR: {errmsg_entry}")
-                    error_count += 1
-            self._log_to_update_file(f"Extraction finished. Files extracted: {update_count}, Errors: {error_count}")
-            print(f"Extraction finished. Files extracted: {update_count}, Errors: {error_count}")
-        except Exception as e:
-            self.error = f"Tar extraction failed: {str(e)}"; print(self.error)
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-            error_count +=1 # Count this as a major error too
-        # finally:
-        #     if tar: 
-        #         try: tar.close() 
-        #         except Exception as e_close: print(f"Error closing tar object: {e_close}")
-        #     try: uos.remove(decompressed_tar_path) 
-        #     except OSError as e_remove: print(f"Warn: Failed to remove {decompressed_tar_path}: {e_remove}")
-
-        if error_count > 0 or self.error: # If any errors occurred during extraction or main tar processing
-             if not self.error: self.error = f"{error_count} errors during tar extraction."
-             # If error_count > 0 and self.error was not previously set, log the new error.
-             # If self.error was already set, it should have been logged at its occurrence.
-             if self.update_log_active and error_count > 0 and str(error_count) in self.error: # self.error just set
-                 self._log_to_update_file(f"ERROR: {self.error}")
-             return False
-        if update_count == 0 and not self.error:
-            self.error = "No files were extracted from the tar archive."
-            print(self.error)
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-            return False
-
-        self._log_to_update_file(f"Firmware successfully extracted to {extract_to_dir}.")
-        print(f"Firmware successfully extracted to {extract_to_dir}.")
+        except Exception as e_entry:
+            errmsg_entry = f"Error processing tar entry '{entry.name if entry else "UNKNOWN"}': {e_entry}"
+            self.logger.error(f"FirmwareUpdater: {errmsg_entry}", log_to_file=True)
+            return False, True  # not processed, error
+    
+    async def _extract_firmware(self, tar_path, extract_to_dir):
+        """Extract the tar file to the specified directory."""
+        self.logger.info(f"Extracting {tar_path} to {extract_to_dir}...", log_to_file=True)
         
-        # --- Step 7: Backup existing files ---
-        self._log_to_update_file("Proceeding to Step 7: Backup existing files.")
-        print("Proceeding to Step 7: Backup existing files.")
+        processed_count = 0
+        error_count = 0
+        tar = None
+        
+        try:
+            self._mkdirs(extract_to_dir)
+        except Exception as e:
+            self.error = f"Directory creation failed for {extract_to_dir}: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+        
+        try:
+            tar = utarfile.TarFile(name=tar_path)
+            for entry in tar:  # Iterate through members
+                processed, had_error = await self._process_tar_entry(tar, entry, extract_to_dir)
+                if processed:
+                    processed_count += 1
+                if had_error:
+                    error_count += 1
+                await asyncio.sleep(0)  # Yield during extraction
+                    
+            self.logger.info(f"Extraction finished. Files processed: {processed_count}, Errors: {error_count}", log_to_file=True)
+
+        except Exception as e:
+            self.error = f"Tar extraction failed: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            error_count += 1  # Count this as a major error too
+            
+        # Check for errors
+        if error_count > 0 or self.error:
+            if not self.error: 
+                self.error = f"{error_count} errors during tar extraction."
+            if str(error_count) in self.error and "errors during tar extraction" in self.error: 
+                 self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+            
+        if processed_count == 0 and not self.error:
+            self.error = "No files were extracted from the tar archive."
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+            
+        self.logger.info(f"Firmware successfully extracted to {extract_to_dir}.", log_to_file=True)
+        return True
+        
+    async def _update_version_file(self):
+        """Update the version file with the pending version."""
+        if not self.pending_update_version:
+            no_pending_ver_msg = "Skipping version file update: No pending version was set (this might be okay if update was aborted earlier)."
+            self.logger.info(no_pending_ver_msg, log_to_file=True)
+            print(no_pending_ver_msg)
+            return True
+            
+        version_update_msg = f"Finalizing update: Writing version {self.pending_update_version} to /version.txt..."
+        self.logger.info(version_update_msg, log_to_file=True)
+        print(version_update_msg)
+        
+        try:
+            with open('/version.txt', 'w') as vf:
+                vf.write(self.pending_update_version)
+            self.current_version = self.pending_update_version
+            self.pending_update_version = None  # Clear after successful write
+            self.logger.info("Version file updated successfully.", log_to_file=True)
+            return True
+            
+        except Exception as e:
+            self.error = f"Critical error: Failed to update version file to {self.pending_update_version} after file system operations: {str(e)}"
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+        
+    async def apply_update(self):
+        """Apply the downloaded firmware update."""
+        self.error = None
+        compressed_file_path = self.firmware_download_path
+        decompressed_tar_path = "/update.tmp.tar"
+        extract_to_dir = "/update"
+        
+        # Step 1: Check if update archive exists
+        try:
+            if not self._check_update_archive_exists(compressed_file_path):
+                return False
+        except Exception:
+            return False  # Error already set and logged in _check_update_archive_exists
+            
+        # Step 2: Decompress the firmware file
+        self.logger.info(f"Step 6: Applying update from {compressed_file_path}...", log_to_file=True)
+        
+        decompression_success = await self._decompress_firmware(compressed_file_path, decompressed_tar_path)
+        if not decompression_success:
+            try: 
+                uos.remove(decompressed_tar_path) 
+            except OSError: 
+                pass
+            self.logger.error("Decompression failed, cannot proceed to extraction.") # Use logger
+            return False
+            
+        # Step 3: Extract the firmware
+        extraction_success = await self._extract_firmware(decompressed_tar_path, extract_to_dir)
+        if not extraction_success:
+            return False
+            
+        # Step 4: Backup existing files
+        self.logger.info("Proceeding to Step 7: Backup existing files.", log_to_file=True)
         if not await self._backup_existing_files():
             # Error already logged by _backup_existing_files
-            # self.error would be set by the helper
-            if self.update_log_active: self._log_to_update_file(f"Update aborted due to backup failure: {self.error}")
-            print(f"Update aborted due to backup failure: {self.error}")
+            self.logger.error(f"Update aborted due to backup failure: {self.error}", log_to_file=True)
             return False
-
-        # --- Step 8: Overwrite root with updated files ---
-        self._log_to_update_file("Proceeding to Step 8: Apply update from /update to /.")   
-        print("Proceeding to Step 8: Apply update from /update to /.")
+            
+        # Step 5: Overwrite root with updated files
+        self.logger.info("Proceeding to Step 8: Apply update from /update to /.", log_to_file=True)
         if not await self._move_from_update_to_root():
             # Error already logged by _move_from_update_to_root
-            # self.error would be set by the helper
-            if self.update_log_active: self._log_to_update_file(f"Update aborted due to overwrite failure: {self.error}")
-            print(f"Update aborted due to overwrite failure: {self.error}")
+            self.logger.error(f"Update aborted due to overwrite failure: {self.error}", log_to_file=True)
             return False
             
-        # --- Finalizing update: Update version file ---
-        if self.pending_update_version:
-            version_update_msg = f"Finalizing update: Writing version {self.pending_update_version} to /version.txt..."
-            if self.update_log_active: self._log_to_update_file(version_update_msg)
-            print(version_update_msg)
-            try:
-                with open('/version.txt', 'w') as vf:
-                    vf.write(self.pending_update_version)
-                self.current_version = self.pending_update_version
-                self.pending_update_version = None # Clear after successful write
-                if self.update_log_active: self._log_to_update_file("Version file updated successfully.")
-                print("Version file updated successfully.")
-            except Exception as e:
-                self.error = f"Critical error: Failed to update version file to {self.pending_update_version} after file system operations: {str(e)}"
-                if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-                print(f"ERROR: {self.error}")
-                # This is a critical error post-update. Device might be in an inconsistent state.
-                # Consider what to do here. For now, we'll still proceed to reboot, but the version will be wrong.
-                # Alternatively, could try to restore backup, but that's complex.
-                # For now, log and continue to reboot if machine.reset() is active
-        else:
-            no_pending_ver_msg = "Skipping version file update: No pending version was set (this might be okay if update was aborted earlier)."
-            if self.update_log_active: self._log_to_update_file(no_pending_ver_msg)
-            print(no_pending_ver_msg)
+        # Step 6: Update version file
+        if not await self._update_version_file():
+            # Error already logged by _update_version_file
+            # This is not a critical failure, so we'll continue to reboot
+            pass
             
-        # --- Step 9: Reboot ---
-        self._log_to_update_file("Step 9: System update successfully applied. Rebooting device...")
-        print("Step 9: System update successfully applied. Rebooting device...")
-        await asyncio.sleep(1) # Brief pause for logs to potentially flush
+        # Step 7: Reboot
+        self.logger.info("Step 9: System update successfully applied. Rebooting device...", log_to_file=True)
+        await asyncio.sleep(1)  # Brief pause for logs to potentially flush
         #machine.reset()
         
-        return True # This line will not be reached due to reset
+        return True
 
     async def _copy_item_recursive(self, source_path, dest_path):
         # Ensure parent of dest_path exists for the current item being copied
@@ -589,15 +713,13 @@ class FirmwareUpdater:
         if is_dir:
             self._mkdirs(dest_path) # Create the directory itself in destination
             log_msg = f"Copying dir: {source_path} to {dest_path}"
-            if self.update_log_active: self._log_to_update_file(log_msg)
-            print(log_msg)
+            self.logger.info(log_msg, log_to_file=True)
             for item_name in uos.listdir(source_path):
                 await self._copy_item_recursive(f"{source_path.rstrip('/')}/{item_name}", f"{dest_path.rstrip('/')}/{item_name}")
                 await asyncio.sleep(0) # Yield during directory iteration
         else: # Is a file
             log_msg = f"Copying file: {source_path} to {dest_path}"
-            if self.update_log_active: self._log_to_update_file(log_msg)
-            print(log_msg)
+            self.logger.info(log_msg, log_to_file=True)
             try:
                 with open(source_path, 'rb') as src_f, open(dest_path, 'wb') as dst_f:
                     while True:
@@ -612,14 +734,12 @@ class FirmwareUpdater:
 
     async def _remove_dir_recursive(self, dir_path):
         log_msg = f"Recursively removing directory: {dir_path}"
-        if self.update_log_active: self._log_to_update_file(log_msg)
-        print(log_msg)
+        self.logger.info(log_msg, log_to_file=True)
         
         # Ensure dir_path is not root, as a safeguard
         if dir_path == '/' or not dir_path:
             err_msg = "Attempted to remove root directory or empty path."
-            if self.update_log_active: self._log_to_update_file(f"CRITICAL ERROR: {err_msg}")
-            print(f"CRITICAL ERROR: {err_msg}")
+            self.logger.error(f"CRITICAL ERROR: {err_msg}", log_to_file=True)
             self.error = err_msg
             raise Exception(err_msg)
             
@@ -636,15 +756,13 @@ class FirmwareUpdater:
                  # If stat fails (e.g. broken symlink or non-existent during concurrent modification)
                  # or remove fails. Log and continue if possible, or re-raise if critical.
                  err_msg_item = f"Error processing {item_path} during recursive delete of {dir_path}: {e}"
-                 if self.update_log_active: self._log_to_update_file(f"WARNING: {err_msg_item}")
-                 print(f"WARNING: {err_msg_item}") # Continue, to try and remove as much as possible
+                 self.logger.warning(f"FirmwareUpdater: {err_msg_item}", log_to_file=True)
             await asyncio.sleep(0) # Yield
         uos.rmdir(dir_path)
 
     async def _backup_existing_files(self):
         step_msg = "Step 7: Backing up existing system files..." 
-        if self.update_log_active: self._log_to_update_file(step_msg)
-        print(step_msg)
+        self.logger.info(step_msg, log_to_file=True)
         
         backup_dir = "/backup"
         # Exclude backup dir, update dir, temp files, logs, and sensitive configs
@@ -653,9 +771,9 @@ class FirmwareUpdater:
             "/update", 
             self.firmware_download_path, # /update.tar.zlib
             "/update.tmp.tar", 
-            self.update_log_path,      # /update.log
-            "/lasterror.json",
-            "/log.txt",
+            # self.update_log_path,      # /update.log
+            # "/lasterror.json",
+            # "/log.txt",
             # "/config.json" # User might want to backup config, or manage separately. Let's include it by default for now.
         ]
         try:
@@ -668,8 +786,7 @@ class FirmwareUpdater:
                 
                 if source_path in excluded_top_level_items:
                     skip_msg = f"Backup: Skipping excluded top-level item: {source_path}"
-                    if self.update_log_active: self._log_to_update_file(skip_msg)
-                    print(skip_msg)
+                    self.logger.info(skip_msg, log_to_file=True)
                     continue
 
                 # Construct full destination path within backup_dir
@@ -681,33 +798,28 @@ class FirmwareUpdater:
                     await self._copy_item_recursive(source_path, dest_path)
                 except Exception as e_copy:
                     self.error = f"Backup error for {source_path} to {dest_path}: {str(e_copy)}"
-                    if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-                    print(f"ERROR: {self.error}")
+                    self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
                     return False # Abort backup on first error
                 await asyncio.sleep(0) # Yield between top-level items
             
             success_msg = "Backup completed successfully."
-            if self.update_log_active: self._log_to_update_file(success_msg)
-            print(success_msg)
+            self.logger.info(success_msg, log_to_file=True)
             return True
         except Exception as e_main:
             self.error = f"Backup process failed: {str(e_main)}"
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}")
-            print(f"ERROR: {self.error}")
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
 
     async def _move_from_update_to_root(self):
         step_msg = "Step 8: Moving updated files from /update to / ..." 
-        if self.update_log_active: self._log_to_update_file(step_msg)
-        print(step_msg)
+        self.logger.info(step_msg, log_to_file=True)
         
         update_source_dir = "/update"
         try:
             update_source_dir_name = update_source_dir.strip('/')
             if not update_source_dir_name in uos.listdir('/'): # Check if /update exists
                  warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
-                 if self.update_log_active: self._log_to_update_file(warn_msg)
-                 print(warn_msg)
+                 self.logger.warning(warn_msg, log_to_file=True)
                  # This might be an error or an acceptable state if the tar was empty (already handled)
                  # For now, let's consider it a success for this step if /update is not there.
                  return True 
@@ -725,97 +837,50 @@ class FirmwareUpdater:
                     is_dir_dest = (s_stat_dest[0] & 0x4000) != 0
                     if is_dir_dest:
                         rm_msg = f"Removing existing directory at root: {dest_item_path}"
-                        if self.update_log_active: self._log_to_update_file(rm_msg); print(rm_msg)
+                        self.logger.info(rm_msg, log_to_file=True)
                         await self._remove_dir_recursive(dest_item_path)
                     else:
                         rm_msg = f"Removing existing file at root: {dest_item_path}"
-                        if self.update_log_active: self._log_to_update_file(rm_msg); print(rm_msg)
+                        self.logger.info(rm_msg, log_to_file=True)
                         uos.remove(dest_item_path)
                 except OSError as e:
                     if e.args[0] == 2: # ENOENT (Error Number 2): File/dir not found
                         pass # Destination doesn't exist, good to go for rename
                     else:
                         self.error = f"Error checking/removing destination {dest_item_path}: {str(e)}"
-                        if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}"); print(f"ERROR: {self.error}")
+                        self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
                         return False # Critical error
 
                 # Now attempt to rename/move the item
                 mv_msg = f"Moving: {source_item_path} to {dest_item_path}"
-                if self.update_log_active: self._log_to_update_file(mv_msg); print(mv_msg)
+                self.logger.info(mv_msg, log_to_file=True)
                 try:
                     uos.rename(source_item_path, dest_item_path)
                 except Exception as e_rename:
                     self.error = f"Failed to move {source_item_path} to {dest_item_path}: {str(e_rename)}"
-                    if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}"); print(f"ERROR: {self.error}")
+                    self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
                     return False # Critical error
                 await asyncio.sleep(0) # Yield between items
 
             # Cleanup: Remove the now-empty /update directory and other temp files
             cleanup_msg = "Cleaning up temporary update files and /update directory..."
-            if self.update_log_active: self._log_to_update_file(cleanup_msg); print(cleanup_msg)
+            self.logger.info(cleanup_msg, log_to_file=True)
             
             await self._remove_dir_recursive(update_source_dir) # remove /update directory
             
             try: 
                 uos.remove(self.firmware_download_path) # /update.tar.zlib
-                if self.update_log_active: self._log_to_update_file(f"Removed {self.firmware_download_path}")
+                self.logger.info(f"Removed {self.firmware_download_path}", log_to_file=True)
             except OSError: pass # May have already been removed or failed silently
             try: 
                 uos.remove("/update.tmp.tar")
-                if self.update_log_active: self._log_to_update_file("Removed /update.tmp.tar")
+                self.logger.info("Removed /update.tmp.tar", log_to_file=True)
             except OSError: pass
             
             final_msg = "Overwrite and cleanup completed successfully."
-            if self.update_log_active: self._log_to_update_file(final_msg); print(final_msg)
+            self.logger.info(final_msg, log_to_file=True)
             return True
         except Exception as e_main_move:
             self.error = f"File overwrite process failed: {str(e_main_move)}"
-            if self.update_log_active: self._log_to_update_file(f"ERROR: {self.error}"); print(f"ERROR: {self.error}")
+            self.logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
-
-# Removed BinDownload class
-# Removed FirmwareDownloader class
-
-# async def main_async():
-#     # This function would need significant changes to use ConfigManager and WiFiManager
-#     # For now, it's commented out as boot.py will be the entry point.
-#     # print("Attempting to connect to WiFi using placeholder credentials...")
-#     # try:
-#     #     # Placeholder for actual WiFi connection logic that would come from WiFiManager
-#     #     # await async_connect_wifi('YOUR_SSID', 'YOUR_PASSWORD') 
-#     #     print("WiFi connected (simulated for standalone test).")
-#     # except Exception as e:
-#     #     print(f"Failed to connect to WiFi: {e}")
-#     #     return 
-
-#     # Placeholder for ConfigManager to get these values
-#     # device_model_val = 'device-model-A'
-#     # base_url_val = 'https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases'
-#     # github_token_val = '' # Potentially from config
-
-#     # updater = FirmwareUpdater(
-#     #     device_model=device_model_val,
-#     #     base_url=base_url_val,
-#     #     github_token=github_token_val
-#     # )
-    
-#     # print("Starting firmware update check...")
-#     # success = await updater.check_and_update() 
-    
-#     # if success:
-#     #     if updater.error: 
-#     #          print(f"Firmware check completed with message: {updater.error}")
-#     #     elif not updater.is_download_done(): 
-#     #          print("Firmware is already up-to-date.")
-#     #     else:
-#     #          print(f"Firmware update successful. New firmware at: {updater.firmware_download_path}")
-#     # else:
-#     #     print(f"Firmware update process failed: {updater.error}")
-
-# if __name__ == "__main__":
-#     # try:
-#     #     asyncio.run(main_async())
-#     # except KeyboardInterrupt:
-#     #     print("Interrupted")
-#     # finally:
-#     #     asyncio.new_event_loop() 
