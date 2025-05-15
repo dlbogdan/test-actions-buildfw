@@ -5,11 +5,11 @@ from lib.manager_wifi import WiFiManager
 import uasyncio as asyncio
 
 # Import the firmware updater if available
-try:
-    from check_fw_update import FirmwareUpdater
-    _has_firmware_updater = True
-except ImportError:
-    _has_firmware_updater = False
+# try:
+from manager_firmware import FirmwareUpdater
+    # _has_firmware_updater = True
+# except ImportError:
+#     _has_firmware_updater = False
 
 class SystemManager:
     """Master system manager that coordinates all subsystems (Singleton)."""
@@ -38,6 +38,9 @@ class SystemManager:
         self._wifi_task = None
         self._is_running = False
         
+        # Device information
+        self._device_name = "Unnamed Device"
+        
         # Properties to expose components
         self._initialized_components = ['log']  # Logger already initialized
 
@@ -52,11 +55,15 @@ class SystemManager:
         self._initialized_components.append('config')
         self._log.info("SystemManager: Config manager initialized")
         
+        # Get device name and log it
+        self._device_name = self._config.get("SYS.DEVICE", "NAME", "Unnamed Device")
+        self._log.info(f"SystemManager: Device name: {self._device_name}")
+        
         # 3. Initialize WiFi if credentials are available
         try:
-            ssid = self._config.get("WIFI", "SSID")
-            password = self._config.get("WIFI", "PASS")
-            hostname = self._config.get("DEVICE", "HOSTNAME", "micropython-device")
+            ssid = self._config.get("SYS.WIFI", "SSID")
+            password = self._config.get("SYS.WIFI", "PASS")
+            hostname = self._config.get("SYS.DEVICE", "NAME", "micropython-device")
             
             if ssid and password:
                 self._wifi = WiFiManager(ssid, password, hostname)
@@ -64,7 +71,7 @@ class SystemManager:
                 self._log.info("SystemManager: WiFi manager initialized")
                 
                 # Start WiFi background task
-                self._start_wifi_task()
+                # self._start_wifi_task()
             else:
                 self._log.info("SystemManager: WiFi not initialized (no credentials)")
         except ValueError as e:
@@ -72,22 +79,21 @@ class SystemManager:
             self._log.info("SystemManager: WiFi not initialized (no credentials)")
         
         # 4. Initialize firmware updater if available
-        if _has_firmware_updater:
-            try:
-                device_model = self._config.get("DEVICE", "MODEL", "generic")
-                base_url = self._config.get("FIRMWARE", "BASE_URL")
-                github_token = self._config.get("FIRMWARE", "GITHUB_TOKEN", "")
+        # if _has_firmware_updater:
+        try:
+            device_model = self._config.get("SYS.DEVICE", "MODEL", "generic")
+            base_url = self._config.get("SYS.FIRMWARE", "BASE_URL")
+            github_token = self._config.get("SYS.FIRMWARE", "GITHUB_TOKEN", "")
                 
-                if base_url:
-                    self._firmware = FirmwareUpdater(device_model, base_url, github_token)
-                    self._initialized_components.append('firmware')
-                    self._log.info("SystemManager: Firmware updater initialized")
-                else:
-                    self._log.info("SystemManager: Firmware updater not initialized (no base URL)")
-            except ValueError as e:
-                self._log.info("SystemManager: Firmware updater not initialized (config error)")
-        else:
-            self._log.info("SystemManager: Firmware updater not available")
+            if base_url:
+                self._firmware = FirmwareUpdater(device_model, base_url, github_token)
+                self._initialized_components.append('firmware')
+                self._log.info("SystemManager: Firmware updater initialized")
+            else:
+                self._log.info("SystemManager: Firmware updater not initialized (no base URL)")
+        except ValueError as e:
+            self._log.info("SystemManager: Firmware updater not initialized (config error)")
+      
             
         self._log.info(f"SystemManager: Initialization complete. Components: {', '.join(self._initialized_components)}")
         return self
@@ -120,7 +126,7 @@ class SystemManager:
             self._log.info("SystemManager: WiFi update loop ended")
             self._wifi_task = None
     
-    def connect_wifi(self):
+    def connect_network(self):
         """Initiate WiFi connection if configured."""
         if 'wifi' not in self._initialized_components or not self._wifi:
             self._log.warning("SystemManager: Cannot connect WiFi - not initialized")
@@ -130,7 +136,7 @@ class SystemManager:
         self._start_wifi_task()  # Ensure task is running
         return True
     
-    def disconnect_wifi(self):
+    def disconnect_network(self):
         """Disconnect WiFi if connected."""
         if 'wifi' not in self._initialized_components or not self._wifi:
             return False
@@ -143,7 +149,7 @@ class SystemManager:
         
         return True
     
-    async def wait_for_wifi(self, timeout_ms=60000):
+    async def wait_for_network(self, timeout_ms=60000):
         """Wait for WiFi to connect, with timeout."""
         if 'wifi' not in self._initialized_components or not self._wifi:
             self._log.warning("SystemManager: Cannot wait for WiFi - not initialized")
@@ -152,7 +158,7 @@ class SystemManager:
         self._log.info(f"SystemManager: Waiting for WiFi connection (timeout: {timeout_ms}ms)")
         
         # Ensure WiFi task is running
-        self.connect_wifi()
+        self.connect_network()
         
         # Wait for connection with timeout
         start_time = time.ticks_ms()
@@ -200,11 +206,16 @@ class SystemManager:
         return self._config or ConfigManager(self.config_file)
         
     @property
-    def wifi(self):
-        """Access the WiFi manager instance."""
+    def network(self):
+        """Access the WiFi manager instance for now. TODO: add network manager"""
         return self._wifi
         
     @property
     def firmware(self):
         """Access the firmware updater instance."""
-        return self._firmware 
+        return self._firmware
+        
+    @property
+    def device_name(self):
+        """Access the device name."""
+        return self._device_name 

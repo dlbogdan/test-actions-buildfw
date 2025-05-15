@@ -434,10 +434,8 @@ class FirmwareUpdater:
             
         # Checksum verification is skipped as per original logic
         logger.info("Skipping checksum verification (not provided by GitHub API).", log_to_file=True)
-        print("Skipping checksum verification (not provided by GitHub API).")
         
         logger.info(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.", log_to_file=True)
-        print(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.")
         return True
 
     def _mkdirs(self, path):

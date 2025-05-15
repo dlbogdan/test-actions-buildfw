@@ -13,20 +13,12 @@ async def main():
         system = SystemManager(config_file="/config.json", debug_level=3)
         system.init()
         
-        # Log information using the logger
-        system.log.info("Main: System initialization complete")
-        
-        # Access configuration
-        device_name = system.config.get("DEVICE", "NAME", "Unnamed Device")
-        system.log.info(f"Main: Device name from config: {device_name}")
-        
-        # Connect to WiFi if available (will be done automatically now)
-        if system.wifi:
+        if system.network:
             system.log.info("Main: Waiting for WiFi connection...")
             
             # Wait for WiFi with timeout
-            if await system.wait_for_wifi(timeout_ms=60000):
-                system.log.info(f"Main: WiFi connected with IP: {system.wifi.get_ip()}")
+            if await system.wait_for_network(timeout_ms=60000):
+                system.log.info(f"Main: WiFi connected with IP: {system.network.get_ip()}")
                 
                 # Check for firmware updates if WiFi is connected
                 if system.firmware:

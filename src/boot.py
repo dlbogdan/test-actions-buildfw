@@ -1,104 +1,78 @@
 import uasyncio as asyncio
-import time
+import machine
 # Ensure your lib modules are accessible, e.g., if src/lib/ then:
 # import sys
 # sys.path.append('lib') # Or adjust as per your project structure if MicroPython needs it
 
-from lib.manager_config import ConfigManager
-from lib.manager_wifi import WiFiManager
-from lib.manager_logger import Logger # Logger is used by other managers
-from check_fw_update import FirmwareUpdater # Assuming check_fw_update.py is in the same dir or accessible
+from lib.manager_system import SystemManager
 
-# Initialize logger first as other managers might use it
-# Logger() is a singleton, so this gets/creates the instance
-logger = Logger() 
-logger.info("Boot sequence started.")
+# Initialize the system manager
+system = SystemManager(config_file="/config.json",debug_level=3)
 
-CONFIG_FILE = "/config.json" # Standard config file name
-config_manager = ConfigManager(CONFIG_FILE)
-
-# async def async_connect_wifi(ssid, password): # REMOVED - WiFiManager will handle this
 
 async def check_update_on_boot():
-    if not config_manager.get("FIRMWARE", "CHECK_FOR_UPDATES_ON_STARTUP", False):
-        logger.info("Boot: Skipping firmware update check on startup.")
+    # Check if firmware updates on startup are enabled\
+    system.init()
+    system.log.info("Boot sequence started with SystemManager.")
+    if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", False):
+        system.log.info("Boot: Skipping firmware update check on startup.")
         return
 
-
-    logger.info("Boot: Initializing WiFi connection process...")
+    # Connect to network
+    system.log.info("Boot: Initializing network connection...")
+    system.connect_network()
+    # Wait for network connection with timeout
+    if not await system.wait_for_network(timeout_ms=60000):
+        system.log.error("Boot: Network connection failed. Skipping firmware update check.")
+        return
     
-    # Get WiFi credentials and device settings from ConfigManager
-    wifi_ssid = config_manager.get("WIFI", "SSID", "YOUR_SSID_DEFAULT") # Provide a default SSID
-    wifi_password = config_manager.get("WIFI", "PASS", "YOUR_PASSWORD_DEFAULT") # Provide a default password
-    device_hostname = config_manager.get("device", "hostname", "MicroPythonDevice")
+    # Continue only if network is connected
+    if system.network and system.network.is_connected():
+        ip_address = system.network.get_ip()
+        system.log.info(f"Boot: Network connected. IP: {ip_address}")
 
-    if wifi_ssid == "YOUR_SSID_DEFAULT":
-        logger.warning("Boot: Using default SSID. Please configure WiFi credentials in config.json.")
+        # Check for firmware updates
+        if system.firmware:
+            system.log.info("Boot: Starting firmware update check...")
+            try:
+                is_available, version_str, release_info = await system.check_firmware_update()
 
-    wifi_manager = WiFiManager(wifi_ssid, wifi_password, device_hostname)
-
-    logger.info("Boot: Attempting to connect to WiFi...")
-    connect_timeout_ms = 60000  # 60 seconds timeout for connection
-    start_connect_time = time.ticks_ms()
-
-    while not wifi_manager.is_connected():
-        wifi_manager.update() # Let WiFiManager handle its non-blocking connection logic
-        if time.ticks_diff(time.ticks_ms(), start_connect_time) > connect_timeout_ms:
-            logger.error("Boot: WiFi connection timed out.")
-            break 
-        await asyncio.sleep_ms(250) # Yield control, check status periodically
-
-    if not wifi_manager.is_connected():
-        logger.error("Boot: Failed to connect to WiFi. Skipping firmware update check.")
-        return # Exit if WiFi connection fails
-    
-    logger.info(f"Boot: WiFi connected. IP: {wifi_manager.get_ip()}")
-
-    # Get FirmwareUpdater settings from ConfigManager
-    device_model = config_manager.get("DEVICE", "MODEL", "device-model-A")
-    base_url = config_manager.get("FIRMWARE", "BASE_URL", "https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases")
-    github_token = config_manager.get("FIRMWARE", "GITHUB_TOKEN", "")
-    
-    updater = FirmwareUpdater(
-        device_model=device_model,
-        base_url=base_url,
-        github_token=github_token
-    )
-    logger.info("Boot: Starting firmware update check...")
-    try:
-        is_available, version_str, release_info = await updater.check_update()
-
-        if updater.error:
-            logger.error(f"Boot: Error during firmware check: {updater.error}")
-        elif is_available:
-            logger.info(f"Boot: Update to version {version_str} is available. Proceeding to download.")
-            if release_info: # Ensure we have release_info to proceed
-                download_success = await updater.download_update(release_info)
-                if download_success:
-                    logger.info(f"Boot: Firmware download successful. New firmware at: {updater.firmware_download_path}. Proceeding to apply.")
-                    await updater.apply_update() # This includes the reboot
-                    # The script might not reach here if apply_update reboots.
-                    logger.info("Boot: Firmware update applied. Device should be rebooting.")
+                if is_available:
+                    system.log.info(f"Boot: Update to version {version_str} is available. Proceeding to download.")
+                    
+                    # Download update
+                    download_success = await system.download_firmware_update(release_info)
+                    
+                    if download_success:
+                        system.log.info("Boot: Firmware download successful. Proceeding to apply.")
+                        
+                        # Apply update (this may reboot the device)
+                        await system.apply_firmware_update()
+                        
+                        # If we reach here, the update may not have triggered a reboot
+                        system.log.info("Boot: Firmware update applied. Device should be rebooting.")
+                        machine.reset()
+                    else:
+                        system.log.error("Boot: Firmware download failed.")
                 else:
-                    logger.error(f"Boot: Firmware download failed: {updater.error if updater.error else 'Unknown reason'}")
-            else:
-                logger.error("Boot: Update available but missing release information to download.")
+                    system.log.info(f"Boot: Firmware is already up-to-date.")
+
+            except Exception as e:
+                system.log.error(f"Boot: An exception occurred during firmware update check: {e}")
         else:
-            logger.info(f"Boot: Firmware is already up-to-date (or no newer version found). Current: {updater.current_version}, Latest checked: {version_str}")
-
-    except Exception as e:
-        logger.error(f"Boot: An exception occurred during firmware update check: {e}")
-
+            system.log.warning("Boot: Firmware updater not initialized. Skipping update check.")
+    else:
+        system.log.error("Boot: Network status check failed after connection attempt.")
 
 # Run the update check on boot
 if __name__ == "__main__":
     try:
         asyncio.run(check_update_on_boot())
     except KeyboardInterrupt:
-        logger.info("Boot: Process interrupted by user.")
+        system.log.info("Boot: Process interrupted by user.")
     except Exception as e:
-        logger.fatal("Boot MAIN", f"Unhandled exception in boot sequence: {e}", resetmachine=False) # Or True if desired
+        system.log.fatal("Boot MAIN", f"Unhandled exception in boot sequence: {e}", resetmachine=False)
     finally:
-        logger.info("Boot: Main execution finished. Consider asyncio.new_event_loop() if issues persist after interrupts.")
-        # For MicroPython, explicit new_event_loop might not always be needed after run completes
-        # or if the script ends here. 
+        system.log.info("Boot: Main execution finished.")
+        # Disconnect network if needed
+        # system.disconnect_network() 
