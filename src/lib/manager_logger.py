@@ -15,9 +15,14 @@ class Logger: #singleton
     ERROR_FILE = "lasterror.json"
     LOG_FILE = "log.txt"
 
-    def __init__(self, debug_level=0):
+    def __init__(self, debug_level=None):
+        if debug_level is not None:
+            self._debug_level = debug_level
         if self._initialized:
             return  # Already initialized, do nothing
+        if debug_level is None:
+            print("Logger: No debug level provided, using default 0")
+            self._debug_level = 0
         self._initialized = True
 
         self._last_error = None

@@ -1,100 +1,74 @@
-import os
 import machine
 import utime
 import uasyncio as asyncio
+from lib.manager_system import SystemManager
 
-# Ensure your lib modules are accessible
-# import sys
-# sys.path.append('lib') # Or adjust as per your project structure
-from lib.manager_logger import Logger 
-logger = Logger(3)
+# Onboard LED (typically GP25 for Pico, or 'LED' for Pico W)
+led_pin = machine.Pin('LED', machine.Pin.OUT)
 
-from lib.manager_config import ConfigManager
-from check_fw_update import FirmwareUpdater
-# Logger can be useful, initialize if needed or rely on FirmwareUpdater's prints
-
-from lib.manager_wifi import WiFiManager
-
-
-
-# Onboard LED is typically GP25 for Pico, or 'LED' for Pico W
-# Use Pin.board.LED if available and targeting Pico W, otherwise use 25
-# led_pin = machine.Pin('LED', machine.Pin.OUT) # For Pico W
-led_pin = machine.Pin('LED', machine.Pin.OUT)    # For Pico standard
-
-async def connect_to_wifi():
-    config_manager = ConfigManager("/config.json") # Assuming config.json is in root
-    wifi_ssid = config_manager.get("WIFI", "SSID") # Provide a default SSID
-    wifi_password = config_manager.get("WIFI", "PASS") # Provide a default password
-    device_hostname = config_manager.get("DEVICE", "HOSTNAME")
-    print(f"device_hostname: {device_hostname}") 
-    wifi_manager = WiFiManager(wifi_ssid, wifi_password, device_hostname)
-
-    logger.info("Boot: Attempting to connect to WiFi...")
-    connect_timeout_ms = 60000  # 60 seconds timeout for connection
-    start_connect_time = utime.ticks_ms()
-
-    while not wifi_manager.is_connected():
-        wifi_manager.update() # Let WiFiManager handle its non-blocking connection logic
-        if utime.ticks_diff(utime.ticks_ms(), start_connect_time) > connect_timeout_ms:
-            logger.error("Boot: WiFi connection timed out.")
-            break 
-        await asyncio.sleep_ms(250) # Yield control, check status periodically
-
-    if not wifi_manager.is_connected():
-        logger.error("Boot: Failed to connect to WiFi. Skipping firmware update check.")
-        return # Exit if WiFi connection fails
-    
-    logger.info(f"Boot: WiFi connected. IP: {wifi_manager.get_ip()}")
-
-async def check_firmware_update_status():
-    print("Main: Initializing configuration for update check...")
-    config_manager = ConfigManager("/config.json") # Assuming config.json is in root
-
-    # Get FirmwareUpdater settings from ConfigManager
-    # Provide sensible defaults if config might be missing these
-    device_model = config_manager.get("DEVICE", "MODEL")
-    base_url = config_manager.get("FIRMWARE", "BASE_URL")
-    github_token = config_manager.get("FIRMWARE", "GITHUB_TOKEN") # Optional
-
-
-    updater = FirmwareUpdater(
-        device_model=device_model,
-        base_url=base_url,
-        github_token=github_token
-    )
-
-    print("Main: Checking for firmware update availability...")
-    try:
-        is_update_available, new_version, _ = await updater.check_update() # Unpack release_info, not used here
-        if updater.error:
-            print(f"Main: Error during update check: {updater.error}")
-        elif is_update_available:
-            print(f"Main: An update to version {new_version} is available.")
-            # You can add any logic here based on this information
-            # e.g., notify user, set a flag, etc.
-        else:
-            print(f"Main: Firmware is up-to-date (or no newer version found). Latest checked: {new_version}")
-
-    except Exception as e:
-        print(f"Main: An exception occurred during the update check: {e}")
-
-# Example of how to run the check (e.g., once at startup)
-# You might integrate this differently depending on your application flow.
 async def main():
     try:
-        # Run the check once
-        await connect_to_wifi()
-        await check_firmware_update_status()
-        print("Main: Proceeding with main application logic (LED blinking)...")
+        # Initialize the system manager as a singleton
+        print("Main: Initializing system components...")
+        system = SystemManager(config_file="/config.json", debug_level=3)
+        system.init()
+        
+        # Log information using the logger
+        system.log.info("Main: System initialization complete")
+        
+        # Access configuration
+        device_name = system.config.get("DEVICE", "NAME", "Unnamed Device")
+        system.log.info(f"Main: Device name from config: {device_name}")
+        
+        # Connect to WiFi if available (will be done automatically now)
+        if system.wifi:
+            system.log.info("Main: Waiting for WiFi connection...")
+            
+            # Wait for WiFi with timeout
+            if await system.wait_for_wifi(timeout_ms=60000):
+                system.log.info(f"Main: WiFi connected with IP: {system.wifi.get_ip()}")
+                
+                # Check for firmware updates if WiFi is connected
+                if system.firmware:
+                    system.log.info("Main: Checking for firmware updates...")
+                    update_available, new_version, release_info = await system.check_firmware_update()
+                    
+                    if update_available:
+                        system.log.info(f"Main: Firmware update available: {new_version}")
+                        
+                        # Download the update
+                        # system.log.info("Main: Downloading firmware update...")
+                        # download_success = await system.download_firmware_update(release_info)
+                        
+                        # if download_success:
+                        #     system.log.info("Main: Firmware download complete. Ready to apply.")
+                            
+                            # Apply the update (uncomment to enable)
+                            # system.log.info("Main: Applying firmware update...")
+                            # await system.apply_firmware_update()
+                    else:
+                        system.log.info("Main: Firmware is up to date")
+            else:
+                system.log.warning("Main: Could not connect to WiFi")
+        
+        # Main application loop
+        system.log.info("Main: Entering main application loop")
         while True:
+            # No need to call system.update() anymore, WiFi is managed in background
+            
+            # Toggle LED as a heartbeat
             led_pin.toggle()
-            utime.sleep(1) # Wait for 1 second
+            
+            # Wait a bit
+            await asyncio.sleep(1)
+            
     except Exception as e:
-        print(f"Main: Error running async update check: {e}")
-
+        print(f"Error: {e}")
+        # Don't try to use system.log here as it might be None if initialization failed
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        machine.reset() 
