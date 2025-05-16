@@ -11,13 +11,15 @@ import deflate # Added for decompression
 import utarfile  # Added for tar extraction
 import utime # Added for update log timestamps
 import machine # Added for machine.reset()
+import binascii
 from lib.manager_logger import Logger # Import the Logger
 logger = Logger()
 
 
 class FirmwareUpdater:
-    def __init__(self, device_model, base_url, github_token="", chunk_size=2048, max_redirects=10):
-        self.base_url = base_url
+    def __init__(self, device_model, github_repo, github_token="", chunk_size=2048, max_redirects=10):
+        #github repo is dlbogdan/test-actions-buildfw and base_url is https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases/latest
+        self.base_url = f"https://api.github.com/repos/{github_repo}/releases/latest"
         self.github_token = github_token
         self.device_model = device_model
         self.current_version = self._read_version()
@@ -150,9 +152,10 @@ class FirmwareUpdater:
                 
             def hexdigest(data):
                 try: 
-                    return data.hexdigest()
+                    return data.hexdigest() # there might be a micropython version when this will become available
                 except Exception: 
-                    return ''.join('{:02x}'.format(byte) for byte in data.digest())
+                    # return ''.join('{:02x}'.format(byte) for byte in data.digest())
+                    return binascii.hexlify(data.digest()) # probably more efficient
                     
             computed_hash = hexdigest(hash_obj) if content_length > 0 else "NO_CONTENT_HASH"
             

@@ -12,57 +12,56 @@ system = SystemManager(config_file="/config.json",debug_level=3)
 
 async def check_update_on_boot():
     # Check if firmware updates on startup are enabled\
-    system.init()
+    # system.init()
     system.log.info("Boot sequence started with SystemManager.")
     if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", False):
         system.log.info("Boot: Skipping firmware update check on startup.")
         return
 
     # Connect to network
-    system.log.info("Boot: Initializing network connection...")
-    system.connect_network()
+    system.log.info("Boot: Bringing up network connection...")
+    system.network.up()
+    
     # Wait for network connection with timeout
-    if not await system.wait_for_network(timeout_ms=60000):
+    if not await system.network.wait_until_up(timeout_ms=60000):
         system.log.error("Boot: Network connection failed. Skipping firmware update check.")
         return
     
     # Continue only if network is connected
-    if system.network and system.network.is_connected():
-        ip_address = system.network.get_ip()
-        system.log.info(f"Boot: Network connected. IP: {ip_address}")
+    ip_address = system.network.get_ip()
+    system.log.info(f"Boot: Network connected. IP: {ip_address}")
 
-        # Check for firmware updates
-        if system.firmware:
-            system.log.info("Boot: Starting firmware update check...")
-            try:
-                is_available, version_str, release_info = await system.check_firmware_update()
+    # Check for firmware updates
+    system.log.info("Boot: Initializing firmware updater...")
+    if system.firmware.init():
+        system.log.info("Boot: Starting firmware update check...")
+        try:
+            is_available, version_str, release_info = await system.firmware.check_update()
 
-                if is_available:
-                    system.log.info(f"Boot: Update to version {version_str} is available. Proceeding to download.")
+            if is_available:
+                system.log.info(f"Boot: Update to version {version_str} is available. Proceeding to download.")
+                
+                # Download update
+                download_success = await system.firmware.download_update(release_info)
+                
+                if download_success:
+                    system.log.info("Boot: Firmware download successful. Proceeding to apply.")
                     
-                    # Download update
-                    download_success = await system.download_firmware_update(release_info)
+                    # Apply update (this may reboot the device)
+                    await system.firmware.apply_update()
                     
-                    if download_success:
-                        system.log.info("Boot: Firmware download successful. Proceeding to apply.")
-                        
-                        # Apply update (this may reboot the device)
-                        await system.apply_firmware_update()
-                        
-                        # If we reach here, the update may not have triggered a reboot
-                        system.log.info("Boot: Firmware update applied. Device should be rebooting.")
-                        machine.reset()
-                    else:
-                        system.log.error("Boot: Firmware download failed.")
+                    # If we reach here, the update may not have triggered a reboot
+                    system.log.info("Boot: Firmware update applied. Device should be rebooting.")
+                    machine.reset()
                 else:
-                    system.log.info(f"Boot: Firmware is already up-to-date.")
+                    system.log.error("Boot: Firmware download failed.")
+            else:
+                system.log.info(f"Boot: Firmware is already up-to-date.")
 
-            except Exception as e:
-                system.log.error(f"Boot: An exception occurred during firmware update check: {e}")
-        else:
-            system.log.warning("Boot: Firmware updater not initialized. Skipping update check.")
+        except Exception as e:
+            system.log.error(f"Boot: An exception occurred during firmware update check: {e}")
     else:
-        system.log.error("Boot: Network status check failed after connection attempt.")
+        system.log.warning("Boot: Firmware updater not available - check configuration")
 
 # Run the update check on boot
 if __name__ == "__main__":

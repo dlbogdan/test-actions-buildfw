@@ -16,6 +16,8 @@ class Logger: #singleton
     LOG_FILE = "log.txt"
 
     def __init__(self, debug_level=None):
+        if not hasattr(self, '_debug_level'):
+            self._debug_level = 0  # Default initialization
         if debug_level is not None:
             self._debug_level = debug_level
         if self._initialized:
@@ -26,7 +28,6 @@ class Logger: #singleton
         self._initialized = True
 
         self._last_error = None
-        self._debug_level = debug_level
         self._error_history = []  # Stores the last 3 errors and warnings
         self._error_timestamps = []  # Tracks timestamps of recent errors for rate limiting
         self._max_error_history = 10
