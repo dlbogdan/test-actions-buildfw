@@ -1,15 +1,11 @@
 import uasyncio as asyncio
 # import network # No longer directly used here
-import usocket
-import ure
-import ssl
 import hashlib
 import gc
 import ujson
 import uos
 import deflate # Added for decompression
 import utarfile  # Added for tar extraction
-import utime # Added for update log timestamps
 import machine # Added for machine.reset()
 import binascii
 from .manager_logger import Logger # Import the Logger
