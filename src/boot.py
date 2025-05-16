@@ -9,6 +9,7 @@ from lib.manager_system import SystemManager
 # Initialize the system manager
 system = SystemManager(config_file="/config.json",debug_level=3)
 
+led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 async def check_update_on_boot():
     # Check if firmware updates on startup are enabled\
@@ -20,6 +21,8 @@ async def check_update_on_boot():
 
     # Connect to network
     system.log.info("Boot: Bringing up network connection...")
+    led_pin.on()
+
     system.network.up()
     
     # Wait for network connection with timeout
@@ -30,7 +33,8 @@ async def check_update_on_boot():
     # Continue only if network is connected
     ip_address = system.network.get_ip()
     system.log.info(f"Boot: Network connected. IP: {ip_address}")
-
+    led_pin.off()
+    
     # Check for firmware updates
     system.log.info("Boot: Initializing firmware updater...")
     if system.firmware.init():
