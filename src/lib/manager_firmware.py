@@ -15,6 +15,7 @@ import binascii
 from lib.manager_logger import Logger # Import the Logger
 logger = Logger()
 
+led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 class FirmwareUpdater:
     def __init__(self, device_model, github_repo, github_token="", chunk_size=2048, max_redirects=10):
@@ -146,9 +147,10 @@ class FirmwareUpdater:
                 elif file_handle:
                     file_handle.write(chunk)
                 self.bytes_read += len(chunk)
+                led_pin.toggle()
                 remaining -= len(chunk)
                 gc.collect()
-                await asyncio.sleep(0)
+                await asyncio.sleep_ms(10)
                 
             def hexdigest(data):
                 try: 
@@ -215,6 +217,7 @@ class FirmwareUpdater:
                 
                 writer.close()
                 await writer.wait_closed()
+                led_pin.off
                 self.download_done = True
                 
                 return (content_str, computed_hash)
