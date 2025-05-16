@@ -42,8 +42,8 @@ def create_tar_archive(source_dir, tar_path, temp_dir):
         # First add boot.py and main.py from root if they exist
         for root_file in ['boot.py', 'main.py']:
             if os.path.exists(os.path.join(source_dir, root_file)):
-                tar.add(os.path.join(source_dir, root_file))
-                print(f"Added {root_file} to archive")
+                tar.add(os.path.join(source_dir, root_file), arcname=root_file)
+                print(f"Added {root_file} to archive as {root_file} at root level")
         
         # Then add all compiled .mpy files
         for root, _, files in os.walk(temp_dir):
