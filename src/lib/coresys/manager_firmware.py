@@ -37,6 +37,8 @@ class FirmwareUpdater:
         # self.update_log_active = False # REMOVED
         self.pending_update_version = None # Added to store version for later update
         self.backup_dir = "/backup"  # Added to store the backup directory path
+        self.updating_file_path = '/__updating'  # Path to the update flag file
+        self.max_update_attempts = 3  # Maximum number of update attempts before giving up
 
 
     def _read_version(self):
@@ -371,6 +373,10 @@ class FirmwareUpdater:
         self.error = None
         logger.info("Checking for firmware updates (metadata only)...", log_to_file=True)
 
+        # Create update flag file with counter 0
+        if not self._create_updating_file():
+            logger.warning("Failed to create update flag file, but continuing with update check", log_to_file=True)
+
         # Step 1: Fetch release metadata
         metadata_content_str = await self._fetch_release_metadata(self.base_url)
         if not metadata_content_str:
@@ -698,7 +704,10 @@ class FirmwareUpdater:
             # This is not a critical failure, so we'll continue to reboot
             pass
             
-        # Step 7: Reboot
+        # Step 7: Remove the __updating file to indicate successful update
+        self._remove_updating_file()
+        
+        # Step 8: Reboot
         logger.info("Step 9: System update successfully applied. Rebooting device...", log_to_file=True)
         await asyncio.sleep(1)  # Brief pause for logs to potentially flush
         #machine.reset()
@@ -768,6 +777,15 @@ class FirmwareUpdater:
         step_msg = "Step 7: Backing up existing system files..." 
         logger.info(step_msg, log_to_file=True)
         
+        # Check if firmware is incomplete or corrupted
+        is_incomplete, reason = self._is_firmware_incomplete()
+        
+        # Skip backup if firmware is incomplete/corrupted
+        if is_incomplete:
+            logger.info(f"Skipping backup process: {reason}", log_to_file=True)
+            logger.info("Previous backup (if any) will be preserved", log_to_file=True)
+            return True  # Return success so the update process continues
+        
         backup_dir = "/backup"
         # Exclude backup dir, update dir, temp files, logs, and sensitive configs
         excluded_top_level_items = [
@@ -775,6 +793,7 @@ class FirmwareUpdater:
             "/update", 
             self.firmware_download_path, # /update.tar.zlib
             "/update.tmp.tar", 
+            self.updating_file_path,     # /__updating
             # self.update_log_path,      # /update.log
             # "/lasterror.json",
             # "/log.txt",
@@ -955,3 +974,123 @@ class FirmwareUpdater:
             self.error = f"System restore process failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
+
+    def _create_updating_file(self):
+        """Create the __updating file with counter 0 to indicate start of update."""
+        try:
+            with open(self.updating_file_path, 'w') as f:
+                f.write('0')  # Initial counter
+            logger.info("Created update flag file with initial counter", log_to_file=True)
+            return True
+        except Exception as e:
+            self.error = f"Failed to create update flag file: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+
+    def _remove_updating_file(self):
+        """Remove the __updating file when update completes successfully."""
+        try:
+            uos.remove(self.updating_file_path)
+            logger.info("Removed update flag file - update completed successfully", log_to_file=True)
+            return True
+        except OSError:
+            # File might not exist, which is fine
+            return True
+        except Exception as e:
+            self.error = f"Failed to remove update flag file: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+
+    def _check_updating_file_status(self):
+        """
+        Check the status of the __updating file.
+        
+        Returns:
+            tuple: (exists, counter, is_failed_update)
+                - exists (bool): Whether the file exists
+                - counter (int): The counter value from the file (0 if file doesn't exist)
+                - is_failed_update (bool): True if counter > 0, indicating a previously failed update
+        """
+        exists = False
+        counter = 0
+        is_failed_update = False
+        
+        try:
+            if self.updating_file_path.strip('/') in uos.listdir('/'):
+                exists = True
+                # Read counter from file
+                try:
+                    with open(self.updating_file_path, 'r') as f:
+                        counter_str = f.read().strip()
+                        counter = int(counter_str or '0')
+                        if counter > 0:
+                            is_failed_update = True
+                            logger.warning(f"Detected interrupted update (attempt {counter})", log_to_file=True)
+                except (ValueError, OSError) as e:
+                    # If we can't read or parse the counter, assume it's corrupted
+                    is_failed_update = True
+                    logger.warning(f"Update flag file may be corrupted: {str(e)}", log_to_file=True)
+        except Exception as e:
+            logger.error(f"Error checking update flag file: {str(e)}", log_to_file=True)
+            
+        return (exists, counter, is_failed_update)
+
+    def _increment_updating_counter(self):
+        """
+        Increment the counter in the __updating file.
+        
+        Returns:
+            tuple: (success, counter, max_reached)
+                - success (bool): Whether the operation succeeded
+                - counter (int): The new counter value
+                - max_reached (bool): Whether the maximum attempts have been reached
+        """
+        success = False
+        counter = 0
+        max_reached = False
+        
+        try:
+            _, current_counter, _ = self._check_updating_file_status()
+            counter = current_counter + 1
+            
+            # Check if we've reached the maximum number of attempts
+            if counter >= self.max_update_attempts:
+                max_reached = True
+                logger.error(f"Maximum update attempts ({self.max_update_attempts}) reached", log_to_file=True)
+            
+            # Write the new counter value
+            with open(self.updating_file_path, 'w') as f:
+                f.write(str(counter))
+            success = True
+            logger.info(f"Incremented update counter to {counter}", log_to_file=True)
+        except Exception as e:
+            logger.error(f"Failed to increment update counter: {str(e)}", log_to_file=True)
+            
+        return (success, counter, max_reached)
+
+    def _is_firmware_incomplete(self):
+        """
+        Check if the current firmware is incomplete or corrupted.
+        #TODO: add proper sha256 checksum verification for EACH FILE in the firmware archive
+        Returns:
+            tuple: (is_incomplete, reason)
+                - is_incomplete (bool): Whether the firmware appears to be incomplete/corrupted
+                - reason (str): Description of why it's considered incomplete
+        """
+        # Check 1: See if main.py is missing or empty
+        try:
+            stat_result = uos.stat("/main.py")
+            main_file_size = stat_result[6]  # Size is at index 6 of the stat result tuple
+            if main_file_size == 0:
+                return (True, "main.py exists but is empty")
+        except OSError:
+            # main.py doesn't exist
+            return (True, "main.py is missing")
+            
+        # Check 2: Check if __updating file indicates a failed update
+        _, _, is_failed_update = self._check_updating_file_status()
+        if is_failed_update:
+            return (True, "Found __updating file with counter > 0 (interrupted update)")
+            
+        # If we get here, firmware appears to be complete
+        return (False, "")
