@@ -17,7 +17,7 @@ def compile_to_mpy(source_dir, temp_dir):
     # Compile files in src directory
     for root, _, files in os.walk(source_dir):
         for file in files:
-            if file.endswith(".py"):
+            if file.endswith(".py") and (not file == "main.py" and not file == "boot.py"):
                 py_path = os.path.join(root, file)
                 # Create relative path structure in temp directory
                 rel_path = os.path.relpath(root, source_dir)
@@ -41,8 +41,8 @@ def create_tar_archive(source_dir, tar_path, temp_dir):
     with tarfile.open(tar_path, "w") as tar:
         # First add boot.py and main.py from root if they exist
         for root_file in ['boot.py', 'main.py']:
-            if os.path.exists(root_file):
-                tar.add(root_file)
+            if os.path.exists(os.path.join(source_dir, root_file)):
+                tar.add(os.path.join(source_dir, root_file))
                 print(f"Added {root_file} to archive")
         
         # Then add all compiled .mpy files
