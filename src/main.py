@@ -2,7 +2,7 @@ import machine
 import utime
 import uasyncio as asyncio
 import gc
-from lib.manager_system import SystemManager
+from lib.coresys.manager_system import SystemManager
 
 # Onboard LED (typically GP25 for Pico, or 'LED' for Pico W)
 led_pin = machine.Pin('LED', machine.Pin.OUT)

@@ -70,7 +70,7 @@ class TarFile:
             if not buf:
                 return None
 
-            h = uctypes.struct(uctypes.addressof(buf), TAR_HEADER, uctypes.LITTLE_ENDIAN)
+            h = uctypes.struct(uctypes.addressof(buf), TAR_HEADER, uctypes.LITTLE_ENDIAN) # type: ignore
 
             # Empty block means end of archive
             if h.name[0] == 0:
@@ -95,7 +95,7 @@ class TarFile:
             else:
                 d.type = REGTYPE
             
-            self.subf = d.subf = FileSection(self.f, d.size, roundup(d.size, 512))
+            self.subf = d.subf = FileSection(self.f, d.size, roundup(d.size, 512)) # type: ignore
             return d
 
     def __iter__(self):

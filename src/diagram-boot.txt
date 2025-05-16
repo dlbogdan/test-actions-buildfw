@@ -1,0 +1,66 @@
+Firmware Update Process on Boot
+│
+└─ Start the boot sequence
+   │
+   └─ Initialize the system
+      │
+      ├─ Create a system manager with configuration and logging
+      │  └─ Sets up core services needed by the system
+      │      
+      ├─ Check if firmware updates on boot are enabled in configuration
+      │  └─ IF DISABLED: Skip the update process entirely
+      │
+      ├─ Begin network connection process
+      │  └─ Prepare the network interface
+      │     ├─ Get WiFi credentials from configuration
+      │     └─ Start background task that maintains WiFi connection
+      │
+      ├─ Wait for network connection (with 60 second timeout)
+      │  └─ Actively monitor connection until established or timeout
+      │     ├─ Ensure WiFi is properly configured
+      │     ├─ If needed, start the connection process
+      │     └─ Poll connection status until connected or timeout expires
+      │
+      ├─ Get the device's network IP address
+      │  └─ Retrieve the IP address assigned by the router/DHCP
+      │
+      ├─ Initialize the firmware update system
+      │  └─ Set up the firmware update capability
+      │     ├─ Check if firmware updater is already prepared
+      │     ├─ Get device model and update server information
+      │     └─ Create a firmware updater with the configuration
+      │        └─ Will fail if update server details are missing
+      │
+      ├─ Check if a firmware update is available
+      │  └─ Connect to update server to find newer versions
+      │     ├─ Request latest release information from GitHub
+      │     │  └─ Download metadata about available releases
+      │     ├─ Process the release information
+      │     │  └─ Extract version numbers and firmware details
+      │     └─ Compare installed version with latest version
+      │        └─ Determine if update is needed based on version numbers
+      │
+      ├─ If update available, download the new firmware
+      │  └─ Get the firmware package from update server
+      │     ├─ Find the correct firmware file for this device model
+      │     │  └─ Filter available assets to find matching firmware
+      │     └─ Download the firmware package
+      │         └─ Transfer the file over HTTPS
+      │            ├─ Handle secure connections and redirects
+      │            └─ Download in small chunks to manage limited memory
+      │
+      └─ If download successful, apply the update
+         └─ Install the new firmware safely
+            ├─ Decompress the firmware package
+            │  └─ Extract the contents from compressed format
+            ├─ Extract the archive to temporary location
+            │  └─ Prepare files while keeping current system running
+            ├─ Back up existing files for safety
+            │  └─ Create backups in case rollback is needed
+            ├─ Replace current files with new versions
+            │  └─ Move new files to their proper locations
+            └─ Update the version information
+               └─ Record the new version in system files
+
+• If the update is successful, the device will reboot with new firmware
+• If any step fails, errors are logged and the boot continues with existing firmware

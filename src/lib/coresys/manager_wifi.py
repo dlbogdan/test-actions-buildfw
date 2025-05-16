@@ -1,6 +1,6 @@
 import time
 import network
-from lib.manager_logger import Logger
+from .manager_logger import Logger
 
 logger = Logger()
 

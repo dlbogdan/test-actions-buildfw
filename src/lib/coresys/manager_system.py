@@ -1,11 +1,11 @@
 import time
-from lib.manager_logger import Logger
-from lib.manager_config import ConfigManager
-from lib.manager_wifi import WiFiManager
-from lib.manager_tasks import TaskManager, TaskEvent
+from .manager_logger import Logger
+from .manager_config import ConfigManager
+from .manager_wifi import WiFiManager
+from .manager_tasks import TaskManager, TaskEvent
 import uasyncio as asyncio
 
-from manager_firmware import FirmwareUpdater
+from .manager_firmware import FirmwareUpdater
 
 
 class NetworkManager:
@@ -160,6 +160,26 @@ class FirmwareManager:
         if isinstance(self._updater, FirmwareUpdater):
             return await self._updater.apply_update()
         return False
+        
+    async def restore_from_backup(self):
+        """Restore system from backup after failed update."""
+        if not self._updater:
+            if not self.init():
+                self._log.error("FirmwareManager: Cannot restore from backup - updater not initialized")
+                return False
+                
+        if isinstance(self._updater, FirmwareUpdater):
+            return await self._updater.restore_from_backup()
+            
+        self._log.error("FirmwareManager: Cannot restore from backup - unexpected updater type")
+        return False
+        
+    @property
+    def error(self):
+        """Get the last error from the firmware updater."""
+        if self._updater and isinstance(self._updater, FirmwareUpdater):
+            return self._updater.error
+        return "Firmware updater not initialized"
 
 class SystemManager:
     """Master system manager that coordinates all subsystems (Singleton)."""

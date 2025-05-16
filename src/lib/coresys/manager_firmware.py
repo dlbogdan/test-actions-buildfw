@@ -12,7 +12,7 @@ import utarfile  # Added for tar extraction
 import utime # Added for update log timestamps
 import machine # Added for machine.reset()
 import binascii
-from lib.manager_logger import Logger # Import the Logger
+from .manager_logger import Logger # Import the Logger
 logger = Logger()
 
 led_pin = machine.Pin('LED', machine.Pin.OUT)
@@ -36,6 +36,7 @@ class FirmwareUpdater:
         # self.update_log_path = '/update.log' # REMOVED
         # self.update_log_active = False # REMOVED
         self.pending_update_version = None # Added to store version for later update
+        self.backup_dir = "/backup"  # Added to store the backup directory path
 
 
     def _read_version(self):
@@ -885,5 +886,72 @@ class FirmwareUpdater:
             return True
         except Exception as e_main_move:
             self.error = f"File overwrite process failed: {str(e_main_move)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+
+    async def restore_from_backup(self):
+        """Restore system files from backup after failed update."""
+        self.error = None
+        logger.info("Attempting to restore system from backup...", log_to_file=True)
+        
+        # Check if backup directory exists
+        try:
+            if not self.backup_dir.strip('/') in uos.listdir('/'):
+                self.error = f"Backup directory {self.backup_dir} not found"
+                logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                return False
+        except Exception as e:
+            self.error = f"Error checking backup directory: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
+            
+        try:
+            # List all files and directories in backup
+            items = uos.listdir(self.backup_dir)
+            if not items:
+                self.error = "Backup directory is empty"
+                logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                return False
+                
+            # Process each item in the backup directory
+            for item_name in items:
+                source_path = f"{self.backup_dir.rstrip('/')}/{item_name}"
+                dest_path = f"/{item_name}"
+                
+                # Check if destination already exists and remove it
+                try:
+                    uos.stat(dest_path)  # Check if exists
+                    s_stat_dest = uos.stat(dest_path)
+                    is_dir_dest = (s_stat_dest[0] & 0x4000) != 0
+                    if is_dir_dest:
+                        logger.info(f"Removing existing directory before restore: {dest_path}", log_to_file=True)
+                        await self._remove_dir_recursive(dest_path)
+                    else:
+                        logger.info(f"Removing existing file before restore: {dest_path}", log_to_file=True)
+                        uos.remove(dest_path)
+                except OSError as e:
+                    if e.args[0] == 2:  # ENOENT (file not found)
+                        pass  # Destination doesn't exist, which is fine
+                    else:
+                        logger.warning(f"Error checking/removing {dest_path}: {e}", log_to_file=True)
+                        # Continue with restoration - not critical if we can't remove
+                
+                # Copy from backup to root
+                try:
+                    logger.info(f"Restoring {source_path} to {dest_path}", log_to_file=True)
+                    await self._copy_item_recursive(source_path, dest_path)
+                except Exception as e_copy:
+                    self.error = f"Failed to restore {source_path} to {dest_path}: {str(e_copy)}"
+                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                    return False
+                    
+                # Yield to prevent blocking for too long
+                await asyncio.sleep(0)
+                
+            logger.info("System successfully restored from backup", log_to_file=True)
+            return True
+            
+        except Exception as e:
+            self.error = f"System restore process failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
