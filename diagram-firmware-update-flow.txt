@@ -1,0 +1,129 @@
+========================================================
+  FIRMWARE UPDATE FLOW DURING BOOT SEQUENCE
+========================================================
+
+boot.py
+  |
+  +--> SystemManager.__init__() [Initialize system]
+  |
+  +--> check_update_on_boot()
+        |
+        +--> Check for update flag file: /__updating
+        |     |
+        |     +--> [Counter >= 3] Interrupted update recovery flow:
+        |     |     |
+        |     |     +--> system.config.set() [Disable auto-updates]
+        |     |     |
+        |     |     +--> system.firmware.init()
+        |     |     |
+        |     |     +--> system.firmware.restore_from_backup()
+        |     |     |     |
+        |     |     |     +--> FirmwareUpdater._copy_item_recursive() [Copy backup files]
+        |     |     |
+        |     |     +--> machine.reset() [Reboot after restore]
+        |     |
+        |     +--> [Counter < 3] Update retry flow:
+        |           |
+        |           +--> Increment counter
+        |
+        +--> system.network.up() [Connect to network]
+        |
+        +--> system.network.wait_until_up() [Wait for connection]
+        |
+        +--> system.firmware.init() [Initialize firmware updater]
+        |
+        +--> Create /__updating file [Set attempt counter = 0]
+        |
+        +--> system.firmware.check_update()
+        |     |
+        |     +--> FirmwareUpdater._fetch_release_metadata()
+        |     |
+        |     +--> FirmwareUpdater._parse_release_metadata()
+        |     |
+        |     +--> FirmwareUpdater._compare_versions()
+        |
+        +--> [Update available] Update flow:
+        |     |
+        |     +--> system.firmware.download_update()
+        |     |     |
+        |     |     +--> FirmwareUpdater._find_firmware_asset()
+        |     |     |
+        |     |     +--> FirmwareUpdater._download_firmware()
+        |     |           |
+        |     |           +--> FirmwareUpdater._download_file()
+        |     |
+        |     +--> system.firmware.apply_update()
+        |           |
+        |           +--> FirmwareUpdater._check_update_archive_exists()
+        |           |
+        |           +--> FirmwareUpdater._decompress_firmware()
+        |           |
+        |           +--> FirmwareUpdater._extract_firmware()
+        |           |     |
+        |           |     +--> FirmwareUpdater._process_tar_entry()
+        |           |           |
+        |           |           +--> Extract integrity.json [Hash verification file]
+        |           |           |
+        |           |           +--> FirmwareUpdater._parse_sha256sums_file()
+        |           |           |
+        |           |           +--> Extract & verify hash for each file
+        |           |
+        |           +--> FirmwareUpdater._backup_existing_files()
+        |           |
+        |           +--> FirmwareUpdater._move_from_update_to_root()
+        |           |
+        |           +--> FirmwareUpdater._update_version_file()
+        |           |
+        |           +--> machine.reset() [Reboot to apply update]
+        |
+        +--> [No update needed] Remove update flag file
+        |
+        +--> [Update failed] Mark as failed, retry on next boot
+
+========================================================
+  FILE INTEGRITY VERIFICATION (HASH CHECK)
+========================================================
+
+[CI/CD PIPELINE - GitHub Actions]
+  |
+  +--> prepare_release.py [Build System - Runs in GitHub Actions]
+        |
+        +--> compile_to_mpy() [Convert .py to .mpy files]
+        |
+        +--> create_hash_file()
+        |     |
+        |     +--> calculate_file_sha256() [Hash each file]
+        |     |
+        |     +--> Write integrity.json [filename->hash mapping]
+        |
+        +--> create_tar_archive()
+        |     |
+        |     +--> Add integrity.json as first file
+        |     |
+        |     +--> Add boot.py, main.py, and .mpy files
+        |
+        +--> compress_zlib() [Compress tar archive]
+        |
+        +--> Generate metadata [For GitHub release]
+        |
+        +--> Release artifacts uploaded to GitHub
+
+[DEVICE SIDE]
+  |
+  +--> FirmwareUpdater._download_file() [Download from GitHub]
+  |
+  +--> FirmwareUpdater._decompress_firmware() [Decompress the zlib file]
+  |
+  +--> FirmwareUpdater._process_tar_entry() [Extract and verify files]
+        |
+        +--> Extract integrity.json first
+        |
+        +--> FirmwareUpdater._parse_sha256sums_file() [Parse JSON hash file]
+        |
+        +--> For each file:
+              |
+              +--> Calculate SHA256 while extracting
+              |
+              +--> Compare with expected hash from integrity.json
+              |
+              +--> Fail update if mismatch detected 

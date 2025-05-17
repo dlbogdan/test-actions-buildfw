@@ -113,15 +113,33 @@ class FirmwareManager:
         try:
             config = self._system.config
             device_model = config.get("SYS.DEVICE", "MODEL", "generic")
-            github_repo = config.get("SYS.FIRMWARE", "GITHUB_REPO")
-            github_token = config.get("SYS.FIRMWARE", "GITHUB_TOKEN", "")
-                
-            if github_repo:
-                self._updater = FirmwareUpdater(device_model, github_repo, github_token)
-                self._log.info("FirmwareManager: Updater initialized")
+            
+            # Check if using direct base URL mode
+            direct_base_url = config.get("SYS.FIRMWARE", "DIRECT_BASE_URL", None)
+            
+            if direct_base_url:
+                # Initialize with direct base URL
+                self._updater = FirmwareUpdater(
+                    device_model=device_model, 
+                    direct_base_url=direct_base_url
+                )
+                self._log.info(f"FirmwareManager: Updater initialized with direct base URL: {direct_base_url}")
                 return True
             else:
-                self._log.info("FirmwareManager: Not initialized (no github repo)")
+                # Try GitHub mode
+                github_repo = config.get("SYS.FIRMWARE", "GITHUB_REPO")
+                github_token = config.get("SYS.FIRMWARE", "GITHUB_TOKEN", "")
+                    
+                if github_repo:
+                    self._updater = FirmwareUpdater(
+                        device_model=device_model, 
+                        github_repo=github_repo, 
+                        github_token=github_token
+                    )
+                    self._log.info(f"FirmwareManager: Updater initialized with GitHub repo: {github_repo}")
+                    return True
+                else:
+                    self._log.info("FirmwareManager: Not initialized (no configuration for update source)")
         except ValueError as e:
             self._log.info(f"FirmwareManager: Not initialized (config error): {e}")
         

@@ -14,9 +14,25 @@ logger = Logger()
 led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 class FirmwareUpdater:
-    def __init__(self, device_model, github_repo, github_token="", chunk_size=2048, max_redirects=10):
-        #github repo is dlbogdan/test-actions-buildfw and base_url is https://api.github.com/repos/dlbogdan/test-actions-buildfw/releases/latest
-        self.base_url = f"https://api.github.com/repos/{github_repo}/releases/latest"
+    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None):
+        # Support both GitHub repo and direct URL modes
+        self.direct_base_url = direct_base_url
+        self.is_direct_mode = direct_base_url is not None
+        
+        if self.is_direct_mode:
+            # Direct base URL mode
+            # Ensure the base URL ends with a slash
+            if self.direct_base_url and not self.direct_base_url.endswith('/'):
+                self.direct_base_url += '/'
+            # Metadata is always at baseURL/metadata.json
+            self.metadata_url = f"{self.direct_base_url}metadata.json"
+            # Firmware URL will be extracted from metadata later
+        else:
+            # GitHub mode (original behavior)
+            if not github_repo:
+                raise ValueError("Either github_repo or direct_base_url must be provided")
+            self.base_url = f"https://api.github.com/repos/{github_repo}/releases/latest"
+            
         self.github_token = github_token
         self.device_model = device_model
         self.current_version = self._read_version()
@@ -28,11 +44,9 @@ class FirmwareUpdater:
         self.error = None
         self.download_started = False
         self.firmware_download_path = '/update.tar.zlib'
-        # self._temp_metadata_path = '/releases.tmp.json' # No longer strictly needed for metadata
-        # self.update_log_path = '/update.log' # REMOVED
-        # self.update_log_active = False # REMOVED
-        self.pending_update_version = None # Added to store version for later update
-        self.backup_dir = "/backup"  # Added to store the backup directory path
+        self.pending_update_version = None
+        self.backup_dir = "/backup"
+        self.hash_sums = {}
 
 
     def _read_version(self):
@@ -53,7 +67,7 @@ class FirmwareUpdater:
             raise ValueError(f"Invalid version format: {version}")
 
     def _parse_url(self, url):
-        """Parse URL into host and path components."""
+        """Parse URL into host, port, and path components."""
         if not isinstance(url, str):
             raise ValueError(f"Invalid URL type: {type(url)}")
 
@@ -63,21 +77,30 @@ class FirmwareUpdater:
         url_no_proto = url[8:]  # Remove https://
         host_end_index = url_no_proto.find('/')
         if host_end_index == -1:
-            host = url_no_proto
+            host_part = url_no_proto
             path = "/"
         else:
-            host = url_no_proto[:host_end_index]
+            host_part = url_no_proto[:host_end_index]
             path = url_no_proto[host_end_index:]
+
+        # Parse port from host if present
+        port = 443  # Default HTTPS port
+        if ':' in host_part:
+            host, port_str = host_part.split(':', 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                logger.error(f"Invalid port in URL: {port_str}, using default 443", log_to_file=True)
+        else:
+            host = host_part
 
         if not host:
             raise ValueError(f"Could not extract host from URL: {url}")
             
-        return host, path
+        return host, port, path
             
-    async def _make_http_request(self, host, path):
+    async def _make_http_request(self, host, port, path):
         """Make an HTTPS request and return the connection and response status."""
-        port = 443
-        
         logger.info(f'Connecting to {host}:{port} for path {path[:50]}...', log_to_file=True)
         reader, writer = await asyncio.open_connection(host, port, ssl=True)
         
@@ -181,8 +204,8 @@ class FirmwareUpdater:
         
         try:
             while redirects > 0:
-                host, path = self._parse_url(current_url)
-                reader, writer, status_line = await self._make_http_request(host, path)
+                host, port, path = self._parse_url(current_url)
+                reader, writer, status_line = await self._make_http_request(host, port, path)
                 
                 if status_line.startswith(b'HTTP/1.1 301') or status_line.startswith(b'HTTP/1.1 302'):
                     location = await self._handle_redirect(reader, writer)
@@ -192,7 +215,7 @@ class FirmwareUpdater:
                     if redirects == 0:
                         raise ValueError("Maximum redirects reached during redirect handling")
                     continue 
-                elif not status_line.startswith(b'HTTP/1.1 200 OK'):
+                elif not (status_line.startswith(b'HTTP/1.1 200 OK') or status_line.startswith(b'HTTP/1.0 200 OK')):
                     writer.close()
                     await writer.wait_closed()
                     raise ValueError(f'Unexpected response: {status_line.decode().strip()}')
@@ -248,7 +271,7 @@ class FirmwareUpdater:
         # Download metadata
         download_result = await self._download_file(
             metadata_url, target_path=None, store_in_memory=True)
-            
+        
         # Unpack download result
         metadata_content_str, metadata_hash = None, None
         if download_result is not None:
@@ -357,18 +380,16 @@ class FirmwareUpdater:
         return True
 
     async def check_update(self):
-        """Checks if a new firmware update is available without downloading.
-        Returns:
-            tuple: (is_update_available, latest_version_str, latest_release_data)
-                   is_update_available (bool): True if an update is available.
-                   latest_version_str (str | None): The version string of the latest release.
-                   latest_release_data (dict | None): The metadata of the latest release.
-        """
+        """Checks if a new firmware update is available without downloading."""
         self.error = None
         logger.info("Checking for firmware updates (metadata only)...", log_to_file=True)
 
         # Step 1: Fetch release metadata
-        metadata_content_str = await self._fetch_release_metadata(self.base_url)
+        if self.is_direct_mode:
+            metadata_content_str = await self._fetch_release_metadata(self.metadata_url)
+        else:
+            metadata_content_str = await self._fetch_release_metadata(self.base_url)
+            
         if not metadata_content_str:
             logger.error(f"Failed to fetch metadata: {self.error}", log_to_file=True)
             return False, None, None
@@ -393,9 +414,9 @@ class FirmwareUpdater:
         else:
             logger.info(f"No new update available. Current: {self.current_version}, Latest: {latest_version_str}", log_to_file=True)
             return False, latest_version_str, latest_release
-
+            
     async def download_update(self, latest_release):
-        """Downloads the firmware update if one is specified by latest_release data."""
+        """Downloads the firmware update."""
         self.error = None
         if not latest_release or not isinstance(latest_release, dict):
             self.error = "Invalid or missing latest_release data for download."
@@ -406,25 +427,38 @@ class FirmwareUpdater:
         if latest_version_str.startswith('v'):
             latest_version_str = latest_version_str[1:]
         
-        # Store the new version for apply_update, assuming download will be successful
-        # This might be better placed after successful download.
+        # Store the new version for apply_update
         self.pending_update_version = latest_version_str
-
-        # --- START Update Log (for download phase) ---
-        # self.update_log_active = True # REMOVED
-        # try: # REMOVED - uos.remove(self.update_log_path)
-            # uos.remove(self.update_log_path) 
-        # except OSError:
-            # pass 
             
         logger.info(f"Preparing to download update: Local v{self.current_version} -> Remote v{latest_version_str}", log_to_file=True)
         logger.info(f"Release Name: {latest_release.get('name', 'N/A')}, Tag: {latest_release.get('tag_name', 'N/A')}", log_to_file=True)
-        # --- END Update Log ---
 
-        # Find firmware asset from the provided release data
-        firmware_url, firmware_filename = self._find_firmware_asset(latest_release)
+        # Get firmware URL based on mode
+        if self.is_direct_mode:
+            # In direct mode, extract firmware URL from the metadata assets
+            firmware_url = None
+            firmware_filename = None
+            
+            # Extract firmware URL from assets array in metadata
+            assets = latest_release.get("assets", [])
+            for asset in assets:
+                if asset.get("name", "").endswith(".tar.zlib"):
+                    firmware_url = asset.get("browser_download_url")
+                    firmware_filename = asset.get("name")
+                    logger.info(f"Found firmware URL in metadata: {firmware_url}", log_to_file=True)
+                    break
+                
+            if not firmware_url:
+                self.error = "No firmware asset found in metadata.json"
+                logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                self.pending_update_version = None
+                return False
+        else:
+            # GitHub mode - find firmware asset from the release data
+            firmware_url, firmware_filename = self._find_firmware_asset(latest_release)
+            
         if not firmware_url:
-            # self.error is set by _find_firmware_asset
+            # self.error is set by _find_firmware_asset in GitHub mode
             self.pending_update_version = None # Clear if asset finding fails
             return False
 
@@ -435,8 +469,7 @@ class FirmwareUpdater:
             self.pending_update_version = None # Clear if download fails
             return False
             
-        # Checksum verification is skipped as per original logic
-        logger.info("Skipping checksum verification (not provided by GitHub API).", log_to_file=True)
+        logger.info("Skipping checksum verification (not provided by metadata API).", log_to_file=True)
         
         logger.info(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.", log_to_file=True)
         return True
@@ -521,6 +554,28 @@ class FirmwareUpdater:
                 except Exception as e_close: 
                     print(f"Error closing f_zlib: {e_close}")
     
+    def _parse_sha256sums_file(self, extract_to_dir):
+        """Parse the integrity.txt file into a dictionary."""
+        hash_file_path = f"{extract_to_dir}/integrity.json"
+        try:
+            with open(hash_file_path, 'r') as hash_file:
+                try:
+                    # Parse as JSON
+                    hash_sums = ujson.load(hash_file)
+                    if not isinstance(hash_sums, dict):
+                        self.error = "Invalid hash file format: not a JSON object"
+                        logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                        return {}
+                    return hash_sums
+                except Exception as json_err:
+                    self.error = f"Failed to parse hash file as JSON: {str(json_err)}"
+                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                    return {}
+        except Exception as e:
+            self.error = f"Failed to open integrity.json: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return {}
+
     async def _process_tar_entry(self, tar, entry, extract_to_dir):
         """Process a single tar entry."""
         try:
@@ -554,13 +609,46 @@ class FirmwareUpdater:
                         
                 f_entry = tar.extractfile(entry)
                 if f_entry:
-                    with open(target_path, "wb") as outfile:
-                        while True:
-                            chunk = f_entry.read(1024)  # Read in chunks
-                            if not chunk: break
-                            outfile.write(chunk)
-                    logger.info(f"Extracted file: {target_path}", log_to_file=True)
-                    return True, False  # processed, no error
+                    # If this is the integrity.json file, just extract it normally
+                    if file_name == "integrity.json":
+                        with open(target_path, "wb") as outfile:
+                            while True:
+                                chunk = f_entry.read(1024)  # Read in chunks
+                                if not chunk: break
+                                outfile.write(chunk)
+                        logger.info(f"Extracted hash file: {target_path}", log_to_file=True)
+                        # Parse the hash file after extracting it
+                        self.hash_sums = self._parse_sha256sums_file(extract_to_dir)
+                        return True, False  # processed, no error
+                    else:
+                        # For all other files, compute hash while extracting
+                        hash_obj = hashlib.sha256()
+                        with open(target_path, "wb") as outfile:
+                            while True:
+                                chunk = f_entry.read(1024)  # Read in chunks
+                                if not chunk: break
+                                hash_obj.update(chunk)
+                                outfile.write(chunk)
+                        
+                        # Verify the hash if we have hash_sums
+                        if self.hash_sums:
+                            # Convert the hash_obj to a hex string
+                            computed_hash = binascii.hexlify(hash_obj.digest()).decode()
+                            
+                            # Check if we have an expected hash for this file
+                            if file_name in self.hash_sums:
+                                expected_hash = self.hash_sums[file_name]
+                                if computed_hash != expected_hash:
+                                    self.error = f"Hash mismatch for {file_name}: computed={computed_hash}, expected={expected_hash}"
+                                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                                    return True, True  # processed, but error
+                                else:
+                                    logger.info(f"Hash verified for {file_name}", log_to_file=True)
+                            else:
+                                logger.warning(f"No hash entry found for {file_name}", log_to_file=True)
+                        
+                        logger.info(f"Extracted file: {target_path}", log_to_file=True)
+                        return True, False  # processed, no error
                 else:
                     logger.warning(f"Could not extract file entry: {file_name}", log_to_file=True)
                     return False, True  # not processed, error
@@ -587,6 +675,10 @@ class FirmwareUpdater:
         
         try:
             tar = utarfile.TarFile(name=tar_path)
+            
+            # Reset hash_sums before beginning extraction
+            self.hash_sums = {}
+            
             for entry in tar:  # Iterate through members
                 processed, had_error = await self._process_tar_entry(tar, entry, extract_to_dir)
                 if processed:
@@ -770,11 +862,10 @@ class FirmwareUpdater:
             backup_dir, 
             "/update", 
             self.firmware_download_path, # /update.tar.zlib
-            "/update.tmp.tar", 
-            # self.update_log_path,      # /update.log
-            # "/lasterror.json",
-            # "/log.txt",
-            # "/config.json" # User might want to backup config, or manage separately. Let's include it by default for now.
+            "/update.tmp.tar",
+            "/log.txt",
+            "/__updating",
+            "/__applying"
         ]
         try:
             self._mkdirs(backup_dir) # Ensure backup_dir itself exists

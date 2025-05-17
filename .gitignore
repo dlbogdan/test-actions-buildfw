@@ -10,3 +10,5 @@ release/
 __pycache__/
 *.pyc
 *.code-workspace
+build/
+version.txt

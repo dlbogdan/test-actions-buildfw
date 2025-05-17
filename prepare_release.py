@@ -11,7 +11,7 @@ SOURCE_DIR = 'src'  # Adjust if your .py files are elsewhere
 OUTPUT_IMAGE = 'release/firmware.tar.zlib'
 METADATA_FILE = 'release/image-info.json'
 DEVICE_TYPE = 'pico'  # Or whatever your target is
-HASH_FILENAME = 'sha256sums.txt'  # Name of the hash file to include in the archive
+HASH_FILENAME = 'integrity.json'  # Name of the hash file to include in the archive
 
 def compile_to_mpy(source_dir, temp_dir):
     """Compile all .py files to .mpy using mpy-cross."""
@@ -47,26 +47,31 @@ def calculate_file_sha256(file_path):
 
 def create_hash_file(source_dir, temp_dir, hash_file_path):
     """Create a hash file with SHA256 sums of all files to be included in the archive."""
-    with open(hash_file_path, 'w') as hash_file:
-        # Add hashes for boot.py and main.py if they exist
-        for root_file in ['boot.py', 'main.py']:
-            root_file_path = os.path.join(source_dir, root_file)
-            if os.path.exists(root_file_path):
-                file_hash = calculate_file_sha256(root_file_path)
-                hash_file.write(f"{file_hash} {root_file}\n")
-                print(f"Added hash for {root_file}: {file_hash}")
-        
-        # Add hashes for all compiled .mpy files
-        for root, _, files in os.walk(temp_dir):
-            for file in files:
-                if file.endswith(".mpy"):
-                    full_path = os.path.join(root, file)
-                    arcname = os.path.relpath(full_path, start=temp_dir)
-                    file_hash = calculate_file_sha256(full_path)
-                    hash_file.write(f"{file_hash} {arcname}\n")
-                    print(f"Added hash for {arcname}: {file_hash}")
+    hash_data = {}
     
-    print(f"Created hash file at {hash_file_path}")
+    # Add hashes for boot.py and main.py if they exist
+    for root_file in ['boot.py', 'main.py']:
+        root_file_path = os.path.join(source_dir, root_file)
+        if os.path.exists(root_file_path):
+            file_hash = calculate_file_sha256(root_file_path)
+            hash_data[root_file] = file_hash
+            print(f"Added hash for {root_file}: {file_hash}")
+    
+    # Add hashes for all compiled .mpy files
+    for root, _, files in os.walk(temp_dir):
+        for file in files:
+            if file.endswith(".mpy"):
+                full_path = os.path.join(root, file)
+                arcname = os.path.relpath(full_path, start=temp_dir)
+                file_hash = calculate_file_sha256(full_path)
+                hash_data[arcname] = file_hash
+                print(f"Added hash for {arcname}: {file_hash}")
+    
+    # Write the hash data as JSON
+    with open(hash_file_path, 'w') as hash_file:
+        json.dump(hash_data, hash_file, indent=2)
+    
+    print(f"Created JSON hash file at {hash_file_path}")
     return hash_file_path
 
 def create_tar_archive(source_dir, tar_path, temp_dir):
