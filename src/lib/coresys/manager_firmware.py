@@ -14,7 +14,7 @@ logger = Logger()
 led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 class FirmwareUpdater:
-    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None):
+    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None, core_system_files=None):
         # Support both GitHub repo and direct URL modes
         self.direct_base_url = direct_base_url
         self.is_direct_mode = direct_base_url is not None
@@ -47,6 +47,7 @@ class FirmwareUpdater:
         self.pending_update_version = None
         self.backup_dir = "/backup"
         self.hash_sums = {}
+        self.core_system_files = core_system_files if core_system_files is not None else []
 
 
     def _read_version(self):
@@ -745,48 +746,85 @@ class FirmwareUpdater:
         # Step 1: Check if update archive exists
         try:
             if not self._check_update_archive_exists(compressed_file_path):
+                # No archive, so no temp files to clean beyond what _check_update_archive_exists might imply
                 return False
         except Exception:
-            return False  # Error already set and logged in _check_update_archive_exists
+            # Error already set and logged in _check_update_archive_exists
+            # No specific temp files created yet to clean here.
+            return False
             
         # Step 2: Decompress the firmware file
         logger.info(f"Step 6: Applying update from {compressed_file_path}...", log_to_file=True)
         
         decompression_success = await self._decompress_firmware(compressed_file_path, decompressed_tar_path)
         if not decompression_success:
-            try: 
-                uos.remove(decompressed_tar_path) 
-            except OSError: 
-                pass
-            logger.error("Decompression failed, cannot proceed to extraction.") # Use logger
+            # Cleanup only the decompressed tar path if it was created
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=False)
+            logger.error("Decompression failed, cannot proceed. Update aborted.", log_to_file=True)
             return False
             
         # Step 3: Extract the firmware
         extraction_success = await self._extract_firmware(decompressed_tar_path, extract_to_dir)
         if not extraction_success:
+            # Cleanup decompressed tar and potentially partially extracted directory
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+            logger.error("Extraction failed, update aborted.", log_to_file=True)
+            return False
+
+        # Step 3.5: Check for core system files
+        if self.core_system_files:
+            logger.info("Checking for core system files in the update package...", log_to_file=True)
+            if not self._check_core_files_exist(extract_to_dir):
+                logger.error(f"Core system file check failed: {self.error}. Aborting update.", log_to_file=True)
+                await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+                return False
+            logger.info("Core system files check passed.", log_to_file=True)
+
+        # Create /__applying flag before starting irreversible operations
+        logger.info("Creating /__applying flag file...", log_to_file=True)
+        try:
+            with open('/__applying', 'w') as f:
+                pass # Create an empty file
+            logger.info("Created /__applying flag file.", log_to_file=True)
+        except Exception as e:
+            self.error = f"Failed to create /__applying flag: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
             return False
             
         # Step 4: Backup existing files
         logger.info("Proceeding to Step 7: Backup existing files.", log_to_file=True)
         if not await self._backup_existing_files():
-            # Error already logged by _backup_existing_files
             logger.error(f"Update aborted due to backup failure: {self.error}", log_to_file=True)
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
             return False
             
         # Step 5: Overwrite root with updated files
         logger.info("Proceeding to Step 8: Apply update from /update to /.", log_to_file=True)
-        if not await self._move_from_update_to_root():
-            # Error already logged by _move_from_update_to_root
+        if not await self._move_from_update_to_root(extract_to_dir): # Pass extract_to_dir for cleanup
             logger.error(f"Update aborted due to overwrite failure: {self.error}", log_to_file=True)
+            # Attempt to restore from backup if move fails, as system might be in inconsistent state
+            logger.info("Attempting to restore from backup due to overwrite failure...", log_to_file=True)
+            await self.restore_from_backup() # Logged internally
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
             return False
             
         # Step 6: Update version file
-        if not await self._update_version_file():
-            # Error already logged by _update_version_file
-            # This is not a critical failure, so we'll continue to reboot
-            pass
+        version_update_success = await self._update_version_file()
+        # We proceed to cleanup and reboot even if version update fails, logging the error.
+        if not version_update_success:
+            logger.error(f"Failed to update version file (error: {self.error}), but continuing to finalize update.", log_to_file=True)
+
+        # Step 7: Final cleanup (including __applying) and Reboot
+        logger.info("Update process appears successful. Performing final cleanup...", log_to_file=True)
+        await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=True, cleanup_extracted_dir=True)
+        # Step 7.5: Remove __applying flag file
+        try:
+            uos.remove('/__applying')
+            logger.info("Removed /__applying flag file.", log_to_file=True)
+        except Exception as e:
+            logger.warning(f"Could not remove /__applying flag file: {str(e)}", log_to_file=True)
             
-        # Step 7: Reboot
         logger.info("Step 9: System update successfully applied. Rebooting device...", log_to_file=True)
         await asyncio.sleep(1)  # Brief pause for logs to potentially flush
         #machine.reset()
@@ -901,21 +939,37 @@ class FirmwareUpdater:
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
 
-    async def _move_from_update_to_root(self):
+    async def _move_from_update_to_root(self, update_source_dir): # Added update_source_dir parameter
         step_msg = "Step 8: Moving updated files from /update to / ..." 
         logger.info(step_msg, log_to_file=True)
         
-        update_source_dir = "/update"
+        # update_source_dir = "/update" # This is now passed as a parameter
         try:
             update_source_dir_name = update_source_dir.strip('/')
-            if not update_source_dir_name in uos.listdir('/'): # Check if /update exists
-                 warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
-                 logger.warning(warn_msg, log_to_file=True)
-                 # This might be an error or an acceptable state if the tar was empty (already handled)
-                 # For now, let's consider it a success for this step if /update is not there.
-                 return True 
-                 
+            # Check if update_source_dir exists and is a directory, and has content.
+            try:
+                uos.stat(update_source_dir) 
+            except OSError as e:
+                if e.args[0] == 2: # ENOENT
+                    warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
+                    logger.warning(warn_msg, log_to_file=True)
+                    return True # Nothing to move, so operation is vacuously successful.
+                else: # Other stat error
+                    self.error = f"Error accessing update source directory {update_source_dir}: {str(e)}"
+                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                    return False
+
             items_to_move = uos.listdir(update_source_dir)
+            if not items_to_move:
+                logger.info(f"Update source directory '{update_source_dir}' is empty. Nothing to move.", log_to_file=True)
+                # Attempt to remove the empty /update directory
+                try:
+                    await self._remove_dir_recursive(update_source_dir)
+                    logger.info(f"Removed empty update source directory: {update_source_dir}", log_to_file=True)
+                except Exception as e_rm_empty:
+                    logger.warning(f"Could not remove empty update source directory {update_source_dir}: {e_rm_empty}", log_to_file=True)
+                return True # No files to move, consider successful for this step.
+                 
             for item_name in items_to_move:
                 source_item_path = f"{update_source_dir.rstrip('/')}/{item_name.lstrip('/')}"
                 dest_item_path = f"/{item_name.lstrip('/')}"
@@ -953,22 +1007,19 @@ class FirmwareUpdater:
                     return False # Critical error
                 await asyncio.sleep(0) # Yield between items
 
-            # Cleanup: Remove the now-empty /update directory and other temp files
-            cleanup_msg = "Cleaning up temporary update files and /update directory..."
+            # Cleanup: Remove the now-empty /update directory.
+            # Other files like .tar.zlib, .tar, and __applying will be handled by _cleanup_temp_update_files
+            cleanup_msg = f"Cleaning up source update directory: {update_source_dir}..."
             logger.info(cleanup_msg, log_to_file=True)
             
-            await self._remove_dir_recursive(update_source_dir) # remove /update directory
+            try:
+                await self._remove_dir_recursive(update_source_dir) 
+                logger.info(f"Removed source update directory: {update_source_dir}", log_to_file=True)
+            except Exception as e_rm_update:
+                 # Non-critical if this fails, as main move was done. Log as warning.
+                logger.warning(f"Failed to remove source update directory {update_source_dir} after move: {e_rm_update}", log_to_file=True)
             
-            try: 
-                uos.remove(self.firmware_download_path) # /update.tar.zlib
-                logger.info(f"Removed {self.firmware_download_path}", log_to_file=True)
-            except OSError: pass # May have already been removed or failed silently
-            try: 
-                uos.remove("/update.tmp.tar")
-                logger.info("Removed /update.tmp.tar", log_to_file=True)
-            except OSError: pass
-            
-            final_msg = "Overwrite and cleanup completed successfully."
+            final_msg = "File move from update to root completed successfully."
             logger.info(final_msg, log_to_file=True)
             return True
         except Exception as e_main_move:
@@ -1042,3 +1093,86 @@ class FirmwareUpdater:
             self.error = f"System restore process failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
+
+    def _check_core_files_exist(self, extract_to_dir):
+        """Check if all core system files exist in the extracted update."""
+        if not self.core_system_files:
+            logger.info("No core system files defined. Skipping check.", log_to_file=True)
+            return True # Nothing to check, so it passes
+
+        missing_files = []
+        for core_file_rel_path in self.core_system_files:
+            # Ensure core_file_rel_path is relative and doesn't start with /
+            normalized_path = core_file_rel_path.lstrip('/')
+            full_path_to_check = f"{extract_to_dir.rstrip('/')}/{normalized_path}"
+            try:
+                uos.stat(full_path_to_check)
+                logger.info(f"Core file found: {full_path_to_check}", log_to_file=True)
+            except OSError as e:
+                if e.args[0] == 2: # ENOENT - No such file or directory
+                    missing_files.append(normalized_path)
+                    logger.error(f"Core file MISSING: {full_path_to_check}", log_to_file=True)
+                else:
+                    # Other OSError (e.g., permission denied)
+                    self.error = f"Error accessing potential core file {full_path_to_check}: {str(e)}"
+                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                    return False # Abort on access error
+
+        if missing_files:
+            self.error = f"Update aborted: Missing core system files in package: {', '.join(missing_files)}"
+            # Logger error is already done per file, this is a summary.
+            return False
+        
+        return True
+
+    async def _cleanup_temp_update_files(self, compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=True, cleanup_extracted_dir=True):
+        """Clean up temporary files and directories used during the update process."""
+        logger.info("Cleaning up temporary update files...", log_to_file=True)
+        
+        # Remove decompressed tar file
+        if decompressed_tar_path:
+            try:
+                uos.stat(decompressed_tar_path) # Check if it exists before trying to remove
+                uos.remove(decompressed_tar_path)
+                logger.info(f"Removed temporary decompressed file: {decompressed_tar_path}", log_to_file=True)
+            except OSError as e:
+                if e.args[0] == 2: # ENOENT
+                    logger.info(f"Temporary decompressed file not found (already removed?): {decompressed_tar_path}", log_to_file=True)
+                else:
+                    logger.warning(f"Could not remove temporary decompressed file {decompressed_tar_path}: {str(e)}", log_to_file=True)
+        
+        # Remove extracted update directory
+        if cleanup_extracted_dir and extract_to_dir:
+            try:
+                # Check if extract_to_dir exists as a directory
+                s_stat = uos.stat(extract_to_dir)
+                is_dir = (s_stat[0] & 0x4000) != 0
+                if is_dir:
+                    await self._remove_dir_recursive(extract_to_dir)
+                    logger.info(f"Removed temporary extraction directory: {extract_to_dir}", log_to_file=True)
+                else: # It exists but is not a directory (should not happen if extraction was successful)
+                    logger.warning(f"Temporary extraction path {extract_to_dir} exists but is not a directory. Attempting to remove as file.", log_to_file=True)
+                    uos.remove(extract_to_dir)
+            except OSError as e:
+                if e.args[0] == 2: # ENOENT
+                     logger.info(f"Temporary extraction directory not found (already removed?): {extract_to_dir}", log_to_file=True)
+                else:
+                    logger.warning(f"Could not remove temporary extraction directory {extract_to_dir}: {str(e)}", log_to_file=True)
+            except Exception as e_rec: # Catch errors from _remove_dir_recursive
+                logger.error(f"Error during recursive removal of {extract_to_dir}: {e_rec}", log_to_file=True)
+
+        # Optionally remove the original downloaded archive
+        if cleanup_archive and compressed_file_path:
+            try:
+                uos.stat(compressed_file_path) # Check if it exists
+                uos.remove(compressed_file_path)
+                logger.info(f"Removed downloaded update archive: {compressed_file_path}", log_to_file=True)
+            except OSError as e:
+                if e.args[0] == 2: # ENOENT
+                    logger.info(f"Downloaded update archive not found (already removed?): {compressed_file_path}", log_to_file=True)
+                else:
+                    logger.warning(f"Could not remove downloaded update archive {compressed_file_path}: {str(e)}", log_to_file=True)
+        logger.info("Temporary file cleanup finished.", log_to_file=True)
+
+# Example usage (conceptual, assuming an event loop is running):
+# async def main():

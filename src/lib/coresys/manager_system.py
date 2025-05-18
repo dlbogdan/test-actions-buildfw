@@ -113,6 +113,7 @@ class FirmwareManager:
         try:
             config = self._system.config
             device_model = config.get("SYS.DEVICE", "MODEL", "generic")
+            core_system_files = config.get("SYS.FIRMWARE", "CORE_SYSTEM_FILES", []) # Get core files
             
             # Check if using direct base URL mode
             direct_base_url = config.get("SYS.FIRMWARE", "DIRECT_BASE_URL", None)
@@ -121,7 +122,8 @@ class FirmwareManager:
                 # Initialize with direct base URL
                 self._updater = FirmwareUpdater(
                     device_model=device_model, 
-                    direct_base_url=direct_base_url
+                    direct_base_url=direct_base_url,
+                    core_system_files=core_system_files # Pass core files
                 )
                 self._log.info(f"FirmwareManager: Updater initialized with direct base URL: {direct_base_url}")
                 return True
@@ -134,7 +136,8 @@ class FirmwareManager:
                     self._updater = FirmwareUpdater(
                         device_model=device_model, 
                         github_repo=github_repo, 
-                        github_token=github_token
+                        github_token=github_token,
+                        core_system_files=core_system_files # Pass core files
                     )
                     self._log.info(f"FirmwareManager: Updater initialized with GitHub repo: {github_repo}")
                     return True

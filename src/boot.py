@@ -42,21 +42,21 @@ async def check_update_on_boot():
     # 1. Check if updates are globally enabled by config.
     # Default to True if UPDATE_ON_BOOT is not explicitly set or main.py is missing.
     perform_update_check_based_on_config = True
-    try:
-        uos.stat("main.py") # Check if main.py exists
-        if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", True):
-            system.log.info("Boot: SYS.FIRMWARE.UPDATE_ON_BOOT is False (main.py exists). Skipping update check.",log_to_file=True)
-            perform_update_check_based_on_config = False
-    except OSError: # main.py doesn't exist
-        system.log.info("Boot: main.py not found.",log_to_file=True)
-        if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", True):
-            # This case is unusual: main.py missing AND updates disabled.
-            # For safety, respect the "disabled" flag if explicitly set.
-            system.log.warning("Boot: main.py missing AND SYS.FIRMWARE.UPDATE_ON_BOOT is False. Skipping update check.",log_to_file=True)
-            perform_update_check_based_on_config = False
-        else:
-            system.log.info("Boot: main.py missing, SYS.FIRMWARE.UPDATE_ON_BOOT is True or not set. Proceeding with update logic.",log_to_file=True)
-            perform_update_check_based_on_config = True
+    # try:
+    #     uos.stat("main.py") # Check if main.py exists
+    #     if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", True):
+    #         system.log.info("Boot: SYS.FIRMWARE.UPDATE_ON_BOOT is False (main.py exists). Skipping update check.",log_to_file=True)
+    #         perform_update_check_based_on_config = False
+    # except OSError: # main.py doesn't exist
+    #     system.log.info("Boot: main.py not found.",log_to_file=True)
+    #     if not system.config.get("SYS.FIRMWARE", "UPDATE_ON_BOOT", True):
+    #         # This case is unusual: main.py missing AND updates disabled.
+    #         # For safety, respect the "disabled" flag if explicitly set.
+    #         system.log.warning("Boot: main.py missing AND SYS.FIRMWARE.UPDATE_ON_BOOT is False. Skipping update check.",log_to_file=True)
+    #         perform_update_check_based_on_config = False
+    #     else:
+    #         system.log.info("Boot: main.py missing, SYS.FIRMWARE.UPDATE_ON_BOOT is True or not set. Proceeding with update logic.",log_to_file=True)
+    #         perform_update_check_based_on_config = True
 
 
     if not perform_update_check_based_on_config:
@@ -197,28 +197,13 @@ async def check_update_on_boot():
                     _download_ok = await system.firmware.download_update(release_info)
                     if _download_ok:
                         system.log.info("Boot: Download successful. Applying update...",log_to_file=True)
-                        # write another flag file __applying to indicate that the update is being applied
-                        system.log.info("Boot: Writing applying flag file...",log_to_file=True)
-                        try:
-                            with open(applying_flag_path, 'w') as f:
-                                f.write('1')
-                        except Exception as e:
-                            system.log.error(f"Boot: Critical error writing update flag '__applying': {e}. Aborting update for this boot.",log_to_file=True)
-                            return 
                         _apply_ok = await system.firmware.apply_update() # Returns True on success
                         if _apply_ok:
                             system.log.info("Boot: apply_update successful.",log_to_file=True)
-                            # remove the __applying flag file
-                            system.log.info("Boot: Removing applying flag file...",log_to_file=True)
-                            try:
-                                uos.remove(applying_flag_path)
-                            except OSError:
-                                pass
                             update_journey_successful = True # SUCCESSFUL UPDATE APPLIED
                         else:
                             system.log.error(f"Boot: apply_update failed: {system.firmware.error}.",log_to_file=True)
                             # we keep the applying flag file to trigger the restoration from backup
-                            system.log.info("Boot: Keeping __applying flag file to trigger restoration from backup.",log_to_file=True)
                             machine.reset()
                     else: # Download failed
                         system.log.error(f"Boot: Firmware download failed: {system.firmware.error}.",log_to_file=True)
