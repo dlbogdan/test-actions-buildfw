@@ -220,7 +220,10 @@ class SystemManager:
             
             # Initialize components with defaults to avoid None issues
             self._log = Logger(debug_level)  # Initialize with default debug level
-            self._config = ConfigManager(self.config_file)  # Initialize config right away to avoid None issues
+            
+            # Initialize system config
+            self._config = ConfigManager(self.config_file) # this will be the system config
+            #self._appconfig = ConfigManager(self.appconfig_file) # this will be the app  config
             
             # Services registry
             self._services = {

@@ -779,6 +779,13 @@ class FirmwareUpdater:
                 await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
                 return False
             logger.info("Core system files check passed.", log_to_file=True)
+            
+        # Step 4: Backup existing files
+        logger.info("Proceeding to Step 7: Backup existing files.", log_to_file=True)
+        if not await self._backup_existing_files():
+            logger.error(f"Update aborted due to backup failure: {self.error}", log_to_file=True)
+            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+            return False
 
         # Create /__applying flag before starting irreversible operations
         logger.info("Creating /__applying flag file...", log_to_file=True)
@@ -791,14 +798,8 @@ class FirmwareUpdater:
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
             return False
-            
-        # Step 4: Backup existing files
-        logger.info("Proceeding to Step 7: Backup existing files.", log_to_file=True)
-        if not await self._backup_existing_files():
-            logger.error(f"Update aborted due to backup failure: {self.error}", log_to_file=True)
-            await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
-            return False
-            
+
+
         # Step 5: Overwrite root with updated files
         logger.info("Proceeding to Step 8: Apply update from /update to /.", log_to_file=True)
         if not await self._move_from_update_to_root(extract_to_dir): # Pass extract_to_dir for cleanup

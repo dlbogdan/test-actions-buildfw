@@ -10,38 +10,37 @@ logger = Logger()
 
 # --- Configuration Management ---
 class ConfigManager:
-    """Handles reading/writing config using JSON format (Singleton)."""
-    _instance = None
-    _initialized = False
+    """Handles reading/writing config using JSON format with registry pattern."""
+    # Registry of instances by filename
+    _instances: Dict[str, 'ConfigManager'] = {}
+    
+    def __new__(cls, filename_config: str):
+        if filename_config not in cls._instances:
+            cls._instances[filename_config] = super().__new__(cls)
+        return cls._instances[filename_config]
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self, filename_config:str):
-        if self._initialized:
-            return # Prevent re-initialization
-        logger.debug(f"Initializing ConfigManager with filename: {filename_config}")
+    def __init__(self, filename_config: str):
+        # Check if this instance has been initialized
+        if hasattr(self, '_initialized') and self._initialized:
+            return  # Prevent re-initialization
+            
+        logger.debug(f"Initializing ConfigManager for file: {filename_config}")
         self.filename_config = filename_config
-        self.config = {} # Holds the parsed config (dict of dicts with types)
+        self.config = {}  # Holds the parsed config (dict of dicts with types)
         # Observer pattern: Store listeners keyed by "section.key"
         self._listeners: Dict[str, List[Callable[[Any], None]]] = {}
         self._load_config()
-        self._initialized = True # Mark as initialized
+        self._initialized = True  # Mark as initialized
+
+    @classmethod
+    def get_instance(cls, filename_config: str) -> 'ConfigManager':
+        """Get an instance by filename. Raises ValueError if not found."""
+        if filename_config not in cls._instances:
+            raise ValueError(f"No ConfigManager instance found for file: {filename_config}")
+        return cls._instances[filename_config]
 
     def _load_config(self):
         """Loads config from JSON file."""
-        # Check if filename_config is set (can happen if __new__ returns existing instance before __init__ runs)
-        if not hasattr(self, 'filename_config') or not self.filename_config:
-             # Try to get it from the instance if it was already initialized
-            if ConfigManager._instance and hasattr(ConfigManager._instance, 'filename_config'):
-                self.filename_config = ConfigManager._instance.filename_config
-            else:
-                logger.error("Cannot load config: filename_config not set.")
-                self.config = {}
-                return
-                
         try:
             with open(self.filename_config, 'r') as f:
                 loaded_data = json.load(f)
