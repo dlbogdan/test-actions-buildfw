@@ -1,6 +1,5 @@
 import uos
 import time
-# Use standard json module
 import json
 from .manager_logger import Logger
 # Import Any for type hinting

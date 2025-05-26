@@ -148,17 +148,18 @@ def get_version(version_arg=None):
     if version_arg:
         return version_arg
     
-    # Try to read from version.txt
+    # Try to read from version.txt in src directory
+    version_file = os.path.join(SOURCE_DIR, 'version.txt')
     try:
-        with open('version.txt', 'r') as f:
+        with open(version_file, 'r') as f:
             version = f.read().strip()
-            print(f"Using version {version} from version.txt")
+            print(f"Using version {version} from {version_file}")
             # Ensure version has 'v' prefix
             if version and not version.startswith('v'):
                 version = f"v{version}"
             return version
     except (FileNotFoundError, IOError):
-        print("No version.txt file found, checking git...")
+        print(f"No {version_file} file found, checking git...")
     
     # Try to get version from git
     try:
@@ -285,6 +286,22 @@ def main():
         
         # Step 4: Create GitHub-like metadata.json
         metadata = create_metadata(compressed_data, version, args.repo, args.port)
+        
+        # Step 5: Write metadata.json file
+        with open(METADATA_FILE, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Created metadata file: {METADATA_FILE}")
+        
+        # Clean up temporary tar file
+        os.remove(temp_tar)
+        print(f"Cleaned up temporary file: {temp_tar}")
+        
+        print(f"\n=== Build complete ===")
+        print(f"Firmware: {OUTPUT_IMAGE}")
+        print(f"Metadata: {METADATA_FILE}")
+        print(f"Version: {version}")
+        print(f"Local IP: {get_local_ip()}")
+        print(f"Size: {len(compressed_data)} bytes")
 
 if __name__ == "__main__":
     main()

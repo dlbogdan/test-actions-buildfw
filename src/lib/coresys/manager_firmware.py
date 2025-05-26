@@ -1,53 +1,58 @@
 import uasyncio as asyncio
-# import network # No longer directly used here
 import hashlib
 import gc
 import ujson
 import uos
-import deflate # Added for decompression
-import utarfile  # Added for tar extraction
-import machine # Added for machine.reset()
+import deflate
+import utarfile
+import machine
 import binascii
-from .manager_logger import Logger # Import the Logger
-logger = Logger()
+from .manager_logger import Logger
 
+logger = Logger()
 led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 class FirmwareUpdater:
-    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None, core_system_files=None):
-        # Support both GitHub repo and direct URL modes
-        self.direct_base_url = direct_base_url
-        self.is_direct_mode = direct_base_url is not None
-        
-        if self.is_direct_mode:
-            # Direct base URL mode
-            # Ensure the base URL ends with a slash
-            if self.direct_base_url and not self.direct_base_url.endswith('/'):
-                self.direct_base_url += '/'
-            # Metadata is always at baseURL/metadata.json
-            self.metadata_url = f"{self.direct_base_url}metadata.json"
-            # Firmware URL will be extracted from metadata later
-        else:
-            # GitHub mode (original behavior)
-            if not github_repo:
-                raise ValueError("Either github_repo or direct_base_url must be provided")
-            self.base_url = f"https://api.github.com/repos/{github_repo}/releases/latest"
-            
-        self.github_token = github_token
+    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None, core_system_files=None, update_on_boot=True, max_failure_attempts=3):
         self.device_model = device_model
         self.current_version = self._read_version()
+        self.error = None
+        
+        # Store injected configuration values
+        self.direct_base_url = direct_base_url
+        self.github_repo = github_repo
+        self.github_token = github_token
         self.chunk_size = chunk_size
         self.max_redirects = max_redirects
+        self.core_system_files = core_system_files or []
+        self.update_on_boot = update_on_boot
+        self.max_failure_attempts = max_failure_attempts
+        
+        # Setup URL modes
+        self.is_direct_mode = self.direct_base_url is not None
+        
+        if self.is_direct_mode:
+            if self.direct_base_url and not self.direct_base_url.endswith('/'):
+                self.direct_base_url += '/'
+            self.metadata_url = f"{self.direct_base_url}metadata.json"
+        else:
+            if not self.github_repo:
+                raise ValueError("Either github_repo or direct_base_url must be provided")
+            self.base_url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
+            
+        # State variables
         self.total_size = 0
         self.bytes_read = 0
         self.download_done = False
-        self.error = None
         self.download_started = False
         self.firmware_download_path = '/update.tar.zlib'
         self.pending_update_version = None
         self.backup_dir = "/backup"
         self.hash_sums = {}
-        self.core_system_files = core_system_files if core_system_files is not None else []
+        
+        # Flag file paths
+        self.update_flag_path = '/__updating'
+        self.applying_flag_path = '/__applying'
 
 
     def _read_version(self):
@@ -55,9 +60,9 @@ class FirmwareUpdater:
         try:
             with open('/version.txt', 'r') as f:
                 return f.read().strip()
-        except Exception as e:
-            logger.warning(f"Error reading version file, defaulting to 0.0.0", log_to_file=True)
-            return "0.0.0"  # Default to a low version if file not found
+        except OSError:
+            logger.warning(f"Version file not found, defaulting to 0.0.0", log_to_file=True)
+            return "0.0.0"
 
     def _parse_semver(self, version):
         """Parse SemVer string into tuple for comparison."""
@@ -69,14 +74,12 @@ class FirmwareUpdater:
 
     def _parse_url(self, url):
         """Parse URL into host, port, and path components."""
-        if not isinstance(url, str):
-            raise ValueError(f"Invalid URL type: {type(url)}")
-
-        if not url.startswith("https://"):
-            logger.error(f"Warning: only HTTPS URLs are supported: {url}", log_to_file=True)
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise ValueError(f"Invalid or non-HTTPS URL: {url}")
         
-        url_no_proto = url[8:]  # Remove https://
+        url_no_proto = url[8:]
         host_end_index = url_no_proto.find('/')
+        
         if host_end_index == -1:
             host_part = url_no_proto
             path = "/"
@@ -84,14 +87,10 @@ class FirmwareUpdater:
             host_part = url_no_proto[:host_end_index]
             path = url_no_proto[host_end_index:]
 
-        # Parse port from host if present
-        port = 443  # Default HTTPS port
+        port = 443
         if ':' in host_part:
             host, port_str = host_part.split(':', 1)
-            try:
-                port = int(port_str)
-            except ValueError:
-                logger.error(f"Invalid port in URL: {port_str}, using default 443", log_to_file=True)
+            port = int(port_str)  # Let ValueError bubble up if invalid
         else:
             host = host_part
 
@@ -192,7 +191,7 @@ class FirmwareUpdater:
             if file_handle:
                 file_handle.close()
 
-    async def _download_file(self, url, target_path, store_in_memory: bool = False):
+    async def _download_file(self, url, target_path, store_in_memory=False):
         """Core download logic, assuming HTTPS. Optionally stores in memory."""
         self.total_size = 0
         self.bytes_read = 0
@@ -200,9 +199,9 @@ class FirmwareUpdater:
         self.error = None
         self.download_started = False
         redirects = self.max_redirects
-        current_url = url 
-        redirect_count = 0
+        current_url = url
         
+        writer = None
         try:
             while redirects > 0:
                 host, port, path = self._parse_url(current_url)
@@ -210,25 +209,23 @@ class FirmwareUpdater:
                 
                 if status_line.startswith(b'HTTP/1.1 301') or status_line.startswith(b'HTTP/1.1 302'):
                     location = await self._handle_redirect(reader, writer)
-                    redirect_count += 1
-                    current_url = location 
+                    current_url = location
                     redirects -= 1
                     if redirects == 0:
-                        raise ValueError("Maximum redirects reached during redirect handling")
-                    continue 
-                elif not (status_line.startswith(b'HTTP/1.1 200 OK') or status_line.startswith(b'HTTP/1.0 200 OK')):
+                        raise ValueError("Maximum redirects reached")
+                    continue
+                    
+                if not (status_line.startswith(b'HTTP/1.1 200') or status_line.startswith(b'HTTP/1.0 200')):
                     writer.close()
                     await writer.wait_closed()
                     raise ValueError(f'Unexpected response: {status_line.decode().strip()}')
 
                 content_length = await self._process_response_headers(reader)
                 
-                if content_length == 0 and not (status_line.startswith(b'HTTP/1.1 204')):
-                    is_metadata_download = store_in_memory
-                    if not is_metadata_download:
-                        writer.close()
-                        await writer.wait_closed()
-                        raise ValueError('Empty content length received for firmware file')
+                if content_length == 0 and not store_in_memory:
+                    writer.close()
+                    await writer.wait_closed()
+                    raise ValueError('Empty content length for firmware file')
 
                 self.download_started = True
                 gc.collect()
@@ -238,23 +235,19 @@ class FirmwareUpdater:
                 
                 writer.close()
                 await writer.wait_closed()
-                led_pin.off
+                led_pin.off()
                 self.download_done = True
                 
-                return (content_str, computed_hash)
+                return content_str, computed_hash
 
-            if redirects == 0:
-                 raise ValueError('Maximum redirects exceeded after loop completion')
+            raise ValueError('Maximum redirects exceeded')
 
         except Exception as e:
             self.error = f"Download failed for {url}: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}")
-            try:
-                if 'writer' in locals() and not writer.is_closing():
-                    writer.close()
-                    await writer.wait_closed()
-            except Exception: 
-                pass 
+            if writer and not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
             return None, None 
 
     def percent_complete(self):
@@ -264,6 +257,55 @@ class FirmwareUpdater:
 
     def is_download_done(self):
         return self.download_done
+    
+    # Flag management methods
+    def check_applying_flag_exists(self):
+        """Check if system was interrupted during update application"""
+        try:
+            uos.stat(self.applying_flag_path)
+            return True
+        except OSError:
+            return False
+    
+    def remove_applying_flag(self):
+        """Remove the applying flag file"""
+        try:
+            uos.remove(self.applying_flag_path)
+            logger.info("Removed applying flag file.", log_to_file=True)
+        except OSError:
+            pass
+    
+    def _cleanup_old_update_flag(self):
+        """Remove old update flag when updates are disabled"""
+        try:
+            uos.remove(self.update_flag_path)
+            logger.info("Removed old update flag as updates are disabled.", log_to_file=True)
+        except OSError:
+            pass
+    
+    def _read_failure_counter(self):
+        """Read the current failure counter from update flag file"""
+        try:
+            with open(self.update_flag_path, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    return int(content)
+        except (OSError, ValueError):
+            pass
+        return 0
+    
+    def _write_failure_counter(self, count):
+        """Write failure counter to update flag file"""
+        with open(self.update_flag_path, 'w') as f:
+            f.write(str(count))
+    
+    def _cleanup_success_flags(self):
+        """Internal method to clean up flags after successful operations"""
+        try:
+            uos.remove(self.update_flag_path)
+            logger.info("Update successful. Removed update flag.", log_to_file=True)
+        except OSError:
+            pass
 
     async def _fetch_release_metadata(self, metadata_url):
         """Fetch release metadata from the provided URL."""
@@ -336,24 +378,7 @@ class FirmwareUpdater:
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
             
-    def _find_firmware_asset(self, release):
-        """Find the firmware asset in the release assets."""
-        assets = release.get("assets", [])
-        firmware_url = None
-        firmware_filename = None
 
-        for asset in assets:
-            if asset.get("name", "").endswith("firmware.tar.zlib"):
-                firmware_url = asset.get("browser_download_url")
-                firmware_filename = asset.get("name")
-                break
-
-        if not firmware_url:
-             self.error = "No firmware asset (firmware.tar.zlib) found in the latest release."
-             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-             return None, None
-             
-        return firmware_url, firmware_filename
         
     async def _download_firmware(self, firmware_url, firmware_filename):
         """Download the firmware file."""
@@ -380,100 +405,103 @@ class FirmwareUpdater:
         logger.info("Firmware download successful.", log_to_file=True)
         return True
 
+    def should_attempt_update(self):
+        """Check if update should be attempted, handling all flag logic internally"""
+        # Check if updates are enabled
+        if not self.update_on_boot:
+            self._cleanup_old_update_flag()
+            return False, "Updates disabled in config"
+            
+        # Check failure counter
+        failure_counter = self._read_failure_counter()
+        
+        if failure_counter >= self.max_failure_attempts:
+            logger.error("Max update failure attempts reached.", log_to_file=True)
+            self.update_on_boot = False
+            logger.info("UPDATE_ON_BOOT disabled to prevent further attempts.", log_to_file=True)
+            self._cleanup_old_update_flag()
+            return False, f"Max attempts reached ({failure_counter})"
+            
+        # Start new attempt - increment counter
+        next_failure_count = failure_counter + 1
+        self._write_failure_counter(next_failure_count)
+        
+        return True, f"Starting update attempt {next_failure_count}"
+
     async def check_update(self):
         """Checks if a new firmware update is available without downloading."""
         self.error = None
-        logger.info("Checking for firmware updates (metadata only)...", log_to_file=True)
+        logger.info("Checking for firmware updates...", log_to_file=True)
 
-        # Step 1: Fetch release metadata
-        if self.is_direct_mode:
-            metadata_content_str = await self._fetch_release_metadata(self.metadata_url)
-        else:
-            metadata_content_str = await self._fetch_release_metadata(self.base_url)
-            
+        # Fetch and parse metadata
+        metadata_url = self.metadata_url if self.is_direct_mode else self.base_url
+        metadata_content_str = await self._fetch_release_metadata(metadata_url)
+        
         if not metadata_content_str:
-            logger.error(f"Failed to fetch metadata: {self.error}", log_to_file=True)
             return False, None, None
 
-        # Step 2: Parse release metadata
         parse_result = self._parse_release_metadata(metadata_content_str)
         if not parse_result:
-            logger.error(f"Failed to parse metadata: {self.error}", log_to_file=True)
             return False, None, None
 
         latest_release, latest_version_str = parse_result
 
-        # Step 3: Compare versions
+        # Compare versions
         is_newer_available = self._compare_versions(latest_version_str)
-        if self.error: # Error during comparison
-            logger.error(f"FirmwareUpdater: Version comparison failed: {self.error}", log_to_file=True)
-            return False, latest_version_str, latest_release # Still return version and release if comparison itself failed
-
+        
         if is_newer_available:
-            logger.info(f"Update available: Current {self.current_version}, Latest {latest_version_str}", log_to_file=True)
-            return True, latest_version_str, latest_release
+            logger.info(f"Update available: {self.current_version} -> {latest_version_str}", log_to_file=True)
         else:
-            logger.info(f"No new update available. Current: {self.current_version}, Latest: {latest_version_str}", log_to_file=True)
-            return False, latest_version_str, latest_release
+            logger.info(f"Firmware is up-to-date: {latest_version_str}", log_to_file=True)
+            # If firmware is up-to-date, clean up any leftover update flags (only if they exist)
+            try:
+                uos.stat(self.update_flag_path)
+                self._cleanup_success_flags()  # Only clean up if flag actually exists
+            except OSError:
+                pass  # No flag to clean up
+            
+        return is_newer_available, latest_version_str, latest_release
             
     async def download_update(self, latest_release):
         """Downloads the firmware update."""
         self.error = None
+        
         if not latest_release or not isinstance(latest_release, dict):
-            self.error = "Invalid or missing latest_release data for download."
-            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            self.error = "Invalid release data"
             return False
 
         latest_version_str = latest_release.get("tag_name", "0.0.0")
         if latest_version_str.startswith('v'):
             latest_version_str = latest_version_str[1:]
         
-        # Store the new version for apply_update
         self.pending_update_version = latest_version_str
-            
-        logger.info(f"Preparing to download update: Local v{self.current_version} -> Remote v{latest_version_str}", log_to_file=True)
-        logger.info(f"Release Name: {latest_release.get('name', 'N/A')}, Tag: {latest_release.get('tag_name', 'N/A')}", log_to_file=True)
+        logger.info(f"Downloading update: {self.current_version} -> {latest_version_str}", log_to_file=True)
 
-        # Get firmware URL based on mode
-        if self.is_direct_mode:
-            # In direct mode, extract firmware URL from the metadata assets
-            firmware_url = None
-            firmware_filename = None
-            
-            # Extract firmware URL from assets array in metadata
-            assets = latest_release.get("assets", [])
-            for asset in assets:
-                if asset.get("name", "").endswith(".tar.zlib"):
-                    firmware_url = asset.get("browser_download_url")
-                    firmware_filename = asset.get("name")
-                    logger.info(f"Found firmware URL in metadata: {firmware_url}", log_to_file=True)
-                    break
-                
-            if not firmware_url:
-                self.error = "No firmware asset found in metadata.json"
-                logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-                self.pending_update_version = None
-                return False
-        else:
-            # GitHub mode - find firmware asset from the release data
-            firmware_url, firmware_filename = self._find_firmware_asset(latest_release)
-            
+        # Find firmware URL
+        firmware_url, firmware_filename = self._get_firmware_url(latest_release)
         if not firmware_url:
-            # self.error is set by _find_firmware_asset in GitHub mode
-            self.pending_update_version = None # Clear if asset finding fails
+            self.pending_update_version = None
             return False
 
         # Download firmware
-        download_success = await self._download_firmware(firmware_url, firmware_filename)
-        if not download_success:
-            # self.error is set by _download_firmware
-            self.pending_update_version = None # Clear if download fails
+        success = await self._download_firmware(firmware_url, firmware_filename)
+        if not success:
+            self.pending_update_version = None
             return False
             
-        logger.info("Skipping checksum verification (not provided by metadata API).", log_to_file=True)
-        
-        logger.info(f"Firmware update downloaded successfully to {self.firmware_download_path}. Version {self.pending_update_version} ready to be applied.", log_to_file=True)
+        logger.info(f"Firmware downloaded successfully: {firmware_filename}", log_to_file=True)
         return True
+        
+    def _get_firmware_url(self, latest_release):
+        """Extract firmware download URL from release data."""
+        assets = latest_release.get("assets", [])
+        
+        for asset in assets:
+            if asset.get("name", "").endswith(".tar.zlib"):
+                return asset.get("browser_download_url"), asset.get("name")
+                
+        self.error = "No firmware asset found in release"
+        return None, None
 
     def _mkdirs(self, path):
         current_path = ""
@@ -530,6 +558,7 @@ class FirmwareUpdater:
                 chunk = d_stream.read(chunk_size)
                 if not chunk: break
                 f_tar_out.write(chunk)
+                led_pin.toggle()
                 await asyncio.sleep(0) 
                 
             logger.info("Decompression successful.", log_to_file=True)
@@ -615,6 +644,7 @@ class FirmwareUpdater:
                         with open(target_path, "wb") as outfile:
                             while True:
                                 chunk = f_entry.read(1024)  # Read in chunks
+                                led_pin.toggle()
                                 if not chunk: break
                                 outfile.write(chunk)
                         logger.info(f"Extracted hash file: {target_path}", log_to_file=True)
@@ -627,6 +657,7 @@ class FirmwareUpdater:
                         with open(target_path, "wb") as outfile:
                             while True:
                                 chunk = f_entry.read(1024)  # Read in chunks
+                                led_pin.toggle()
                                 if not chunk: break
                                 hash_obj.update(chunk)
                                 outfile.write(chunk)
@@ -827,6 +858,10 @@ class FirmwareUpdater:
             logger.warning(f"Could not remove /__applying flag file: {str(e)}", log_to_file=True)
             
         logger.info("Step 9: System update successfully applied. Rebooting device...", log_to_file=True)
+        
+        # Automatically clean up success flags since update was successful
+        self._cleanup_success_flags()
+        
         await asyncio.sleep(1)  # Brief pause for logs to potentially flush
         #machine.reset()
         
@@ -855,6 +890,7 @@ class FirmwareUpdater:
                 with open(source_path, 'rb') as src_f, open(dest_path, 'wb') as dst_f:
                     while True:
                         chunk = src_f.read(self.chunk_size) 
+                        led_pin.toggle()
                         if not chunk: break
                         dst_f.write(chunk)
                         # Yield more frequently for very large files if chunk_size is small
@@ -1088,11 +1124,13 @@ class FirmwareUpdater:
                 await asyncio.sleep(0)
                 
             logger.info("System successfully restored from backup", log_to_file=True)
+            self.remove_applying_flag()
             return True
             
         except Exception as e:
             self.error = f"System restore process failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            self.remove_applying_flag()  # Remove flag even on failure
             return False
 
     def _check_core_files_exist(self, extract_to_dir):

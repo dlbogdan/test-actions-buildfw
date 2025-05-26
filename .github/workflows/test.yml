@@ -1,0 +1,124 @@
+name: Test MicroPython Firmware
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/dev-requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r dev-requirements.txt
+
+    - name: Run linting
+      run: |
+        # Run code formatting check
+        black --check --diff src/ tests/ *.py
+        
+        # Run import sorting check
+        isort --check-only --diff src/ tests/ *.py
+        
+        # Run flake8 linting
+        flake8 src/ tests/ *.py
+
+    - name: Run unit tests with mocks
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=html --cov-fail-under=70
+
+    - name: Run demonstration script
+      run: |
+        python run_tests.py
+
+    - name: Install MicroPython (for integration tests)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y micropython
+
+    - name: Test MicroPython compatibility
+      run: |
+        # Test that our code can import in MicroPython
+        echo "import sys; sys.path.append('src'); from lib.coresys.manager_config import ConfigManager; print('✓ Import successful')" | micropython
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+    - name: Upload coverage HTML report
+      uses: actions/upload-artifact@v3
+      if: matrix.python-version == '3.11'
+      with:
+        name: coverage-report
+        path: htmlcov/
+
+  build-test:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Test firmware build process
+      run: |
+        # Test the build system
+        python local_builder.py --version v1.0.0-test --repo test/repo --port 8000
+
+    - name: Verify build outputs
+      run: |
+        # Check that build artifacts were created
+        ls -la build/
+        test -f build/firmware.tar.zlib
+        test -f build/metadata.json
+        
+        # Verify metadata content
+        python -c "
+        import json
+        with open('build/metadata.json', 'r') as f:
+            metadata = json.load(f)
+        assert metadata['tag_name'] == 'v1.0.0-test'
+        print('✓ Build verification passed')
+        "
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: firmware-build
+        path: build/ 
