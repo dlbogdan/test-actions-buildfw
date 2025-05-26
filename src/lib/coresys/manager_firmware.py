@@ -7,13 +7,31 @@ import deflate
 import utarfile
 import machine
 import binascii
-from .manager_logger import Logger
+import lib.coresys.logger as logger
 
-logger = Logger()
+# logger = logger.Logger()
 led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 class FirmwareUpdater:
-    def __init__(self, device_model, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None, core_system_files=None, update_on_boot=True, max_failure_attempts=3):
+    """Singleton firmware updater with progress callback support."""
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, device_model=None, github_repo=None, github_token="", chunk_size=2048, max_redirects=10, direct_base_url=None, core_system_files=None, update_on_boot=True, max_failure_attempts=3, progress_callback=None):
+        # If already initialized, just update the progress callback if provided
+        if self._initialized:
+            if progress_callback is not None:
+                self.progress_callback = progress_callback
+            return
+            
+        if device_model is None:
+            raise ValueError("device_model is required for first initialization")
+            
         self.device_model = device_model
         self.current_version = self._read_version()
         self.error = None
@@ -27,6 +45,9 @@ class FirmwareUpdater:
         self.core_system_files = core_system_files or []
         self.update_on_boot = update_on_boot
         self.max_failure_attempts = max_failure_attempts
+        
+        # Progress callback support
+        self.progress_callback = progress_callback
         
         # Setup URL modes
         self.is_direct_mode = self.direct_base_url is not None
@@ -53,7 +74,36 @@ class FirmwareUpdater:
         # Flag file paths
         self.update_flag_path = '/__updating'
         self.applying_flag_path = '/__applying'
+        
+        self._initialized = True
 
+    @classmethod
+    def get_instance(cls):
+        """Get the singleton instance if it exists."""
+        return cls._instance
+
+    @classmethod
+    def reset_instance(cls):
+        """Reset the singleton instance (mainly for testing)."""
+        cls._instance = None
+        cls._initialized = False
+
+    def set_progress_callback(self, callback):
+        """Set or update the progress callback function."""
+        self.progress_callback = callback
+
+    def _notify_progress(self, stage, progress_percent=0, message="", **kwargs):
+        """Notify progress callback if set."""
+        if self.progress_callback:
+            try:
+                self.progress_callback(
+                    stage=stage,
+                    progress_percent=progress_percent,
+                    message=message,
+                    **kwargs
+                )
+            except Exception as e:
+                logger.warning(f"Progress callback error: {e}", log_to_file=True)
 
     def _read_version(self):
         """Read the current version from a version file."""
@@ -157,6 +207,7 @@ class FirmwareUpdater:
         
         try:
             remaining = content_length
+            last_progress_percent = 0
             while remaining > 0:
                 chunk = await reader.read(min(self.chunk_size, remaining))
                 if not chunk: 
@@ -169,6 +220,19 @@ class FirmwareUpdater:
                 self.bytes_read += len(chunk)
                 led_pin.toggle()
                 remaining -= len(chunk)
+                
+                # Notify progress callback for download progress
+                current_progress = self.percent_complete()
+                if current_progress != last_progress_percent and current_progress % 5 == 0:  # Update every 5%
+                    self._notify_progress(
+                        stage="downloading",
+                        progress_percent=current_progress,
+                        message=f"Downloaded {self.bytes_read}/{self.total_size} bytes",
+                        bytes_downloaded=self.bytes_read,
+                        total_bytes=self.total_size
+                    )
+                    last_progress_percent = current_progress
+                
                 gc.collect()
                 await asyncio.sleep_ms(10)
                 
@@ -432,27 +496,37 @@ class FirmwareUpdater:
         """Checks if a new firmware update is available without downloading."""
         self.error = None
         logger.info("Checking for firmware updates...", log_to_file=True)
+        self._notify_progress("checking", 0, "Checking for firmware updates...")
 
         # Fetch and parse metadata
         metadata_url = self.metadata_url if self.is_direct_mode else self.base_url
+        self._notify_progress("checking", 25, "Fetching release metadata...")
         metadata_content_str = await self._fetch_release_metadata(metadata_url)
         
         if not metadata_content_str:
+            self._notify_progress("checking", 100, "Failed to fetch metadata", error=self.error)
             return False, None, None
 
+        self._notify_progress("checking", 50, "Parsing release metadata...")
         parse_result = self._parse_release_metadata(metadata_content_str)
         if not parse_result:
+            self._notify_progress("checking", 100, "Failed to parse metadata", error=self.error)
             return False, None, None
 
         latest_release, latest_version_str = parse_result
 
         # Compare versions
+        self._notify_progress("checking", 75, "Comparing versions...")
         is_newer_available = self._compare_versions(latest_version_str)
         
         if is_newer_available:
             logger.info(f"Update available: {self.current_version} -> {latest_version_str}", log_to_file=True)
+            self._notify_progress("checking", 100, f"Update available: {self.current_version} -> {latest_version_str}", 
+                                current_version=self.current_version, latest_version=latest_version_str)
         else:
             logger.info(f"Firmware is up-to-date: {latest_version_str}", log_to_file=True)
+            self._notify_progress("checking", 100, f"Firmware is up-to-date: {latest_version_str}", 
+                                current_version=self.current_version, latest_version=latest_version_str)
             # If firmware is up-to-date, clean up any leftover update flags (only if they exist)
             try:
                 uos.stat(self.update_flag_path)
@@ -465,9 +539,11 @@ class FirmwareUpdater:
     async def download_update(self, latest_release):
         """Downloads the firmware update."""
         self.error = None
+        self._notify_progress("downloading", 0, "Starting firmware download...")
         
         if not latest_release or not isinstance(latest_release, dict):
             self.error = "Invalid release data"
+            self._notify_progress("downloading", 100, "Invalid release data", error=self.error)
             return False
 
         latest_version_str = latest_release.get("tag_name", "0.0.0")
@@ -476,20 +552,25 @@ class FirmwareUpdater:
         
         self.pending_update_version = latest_version_str
         logger.info(f"Downloading update: {self.current_version} -> {latest_version_str}", log_to_file=True)
+        self._notify_progress("downloading", 5, f"Preparing to download version {latest_version_str}")
 
         # Find firmware URL
         firmware_url, firmware_filename = self._get_firmware_url(latest_release)
         if not firmware_url:
             self.pending_update_version = None
+            self._notify_progress("downloading", 100, "No firmware asset found", error=self.error)
             return False
 
         # Download firmware
+        self._notify_progress("downloading", 10, f"Starting download of {firmware_filename}")
         success = await self._download_firmware(firmware_url, firmware_filename)
         if not success:
             self.pending_update_version = None
+            self._notify_progress("downloading", 100, "Download failed", error=self.error)
             return False
             
         logger.info(f"Firmware downloaded successfully: {firmware_filename}", log_to_file=True)
+        self._notify_progress("downloading", 100, f"Download completed: {firmware_filename}")
         return True
         
     def _get_firmware_url(self, latest_release):
@@ -774,52 +855,65 @@ class FirmwareUpdater:
         decompressed_tar_path = "/update.tmp.tar"
         extract_to_dir = "/update"
         
+        self._notify_progress("applying", 0, "Starting update application...")
+        
         # Step 1: Check if update archive exists
         try:
             if not self._check_update_archive_exists(compressed_file_path):
                 # No archive, so no temp files to clean beyond what _check_update_archive_exists might imply
+                self._notify_progress("applying", 100, "Update archive not found", error="Archive not found")
                 return False
         except Exception:
             # Error already set and logged in _check_update_archive_exists
             # No specific temp files created yet to clean here.
+            self._notify_progress("applying", 100, "Error accessing update archive", error=self.error)
             return False
             
         # Step 2: Decompress the firmware file
         logger.info(f"Step 6: Applying update from {compressed_file_path}...", log_to_file=True)
+        self._notify_progress("applying", 10, "Decompressing firmware archive...")
         
         decompression_success = await self._decompress_firmware(compressed_file_path, decompressed_tar_path)
         if not decompression_success:
             # Cleanup only the decompressed tar path if it was created
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=False)
             logger.error("Decompression failed, cannot proceed. Update aborted.", log_to_file=True)
+            self._notify_progress("applying", 100, "Decompression failed", error=self.error)
             return False
             
         # Step 3: Extract the firmware
+        self._notify_progress("applying", 25, "Extracting firmware files...")
         extraction_success = await self._extract_firmware(decompressed_tar_path, extract_to_dir)
         if not extraction_success:
             # Cleanup decompressed tar and potentially partially extracted directory
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
             logger.error("Extraction failed, update aborted.", log_to_file=True)
+            self._notify_progress("applying", 100, "Extraction failed", error=self.error)
             return False
 
         # Step 3.5: Check for core system files
         if self.core_system_files:
+            self._notify_progress("applying", 35, "Checking core system files...")
             logger.info("Checking for core system files in the update package...", log_to_file=True)
             if not self._check_core_files_exist(extract_to_dir):
                 logger.error(f"Core system file check failed: {self.error}. Aborting update.", log_to_file=True)
                 await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+                self._notify_progress("applying", 100, "Core system file check failed", error=self.error)
                 return False
             logger.info("Core system files check passed.", log_to_file=True)
             
         # Step 4: Backup existing files
         logger.info("Proceeding to Step 7: Backup existing files.", log_to_file=True)
+        self._notify_progress("applying", 45, "Backing up existing files...")
         if not await self._backup_existing_files():
             logger.error(f"Update aborted due to backup failure: {self.error}", log_to_file=True)
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+            self._notify_progress("applying", 100, "Backup failed", error=self.error)
             return False
 
         # Create /__applying flag before starting irreversible operations
         logger.info("Creating /__applying flag file...", log_to_file=True)
+        self._notify_progress("applying", 55, "Creating applying flag...")
         try:
             with open('/__applying', 'w') as f:
                 pass # Create an empty file
@@ -828,20 +922,25 @@ class FirmwareUpdater:
             self.error = f"Failed to create /__applying flag: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+            self._notify_progress("applying", 100, "Failed to create applying flag", error=self.error)
             return False
 
 
         # Step 5: Overwrite root with updated files
         logger.info("Proceeding to Step 8: Apply update from /update to /.", log_to_file=True)
+        self._notify_progress("applying", 65, "Applying updated files to system...")
         if not await self._move_from_update_to_root(extract_to_dir): # Pass extract_to_dir for cleanup
             logger.error(f"Update aborted due to overwrite failure: {self.error}", log_to_file=True)
             # Attempt to restore from backup if move fails, as system might be in inconsistent state
             logger.info("Attempting to restore from backup due to overwrite failure...", log_to_file=True)
+            self._notify_progress("applying", 70, "Restoring from backup due to failure...")
             await self.restore_from_backup() # Logged internally
             await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=False, cleanup_extracted_dir=True)
+            self._notify_progress("applying", 100, "File overwrite failed", error=self.error)
             return False
             
         # Step 6: Update version file
+        self._notify_progress("applying", 85, "Updating version file...")
         version_update_success = await self._update_version_file()
         # We proceed to cleanup and reboot even if version update fails, logging the error.
         if not version_update_success:
@@ -849,6 +948,7 @@ class FirmwareUpdater:
 
         # Step 7: Final cleanup (including __applying) and Reboot
         logger.info("Update process appears successful. Performing final cleanup...", log_to_file=True)
+        self._notify_progress("applying", 95, "Cleaning up temporary files...")
         await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=True, cleanup_extracted_dir=True)
         # Step 7.5: Remove __applying flag file
         try:
@@ -862,6 +962,7 @@ class FirmwareUpdater:
         # Automatically clean up success flags since update was successful
         self._cleanup_success_flags()
         
+        self._notify_progress("applying", 100, "Update completed successfully. Rebooting...")
         await asyncio.sleep(1)  # Brief pause for logs to potentially flush
         #machine.reset()
         
@@ -1068,28 +1169,36 @@ class FirmwareUpdater:
         """Restore system files from backup after failed update."""
         self.error = None
         logger.info("Attempting to restore system from backup...", log_to_file=True)
+        self._notify_progress("restoring", 0, "Starting system restore from backup...")
         
         # Check if backup directory exists
         try:
             if not self.backup_dir.strip('/') in uos.listdir('/'):
                 self.error = f"Backup directory {self.backup_dir} not found"
                 logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                self._notify_progress("restoring", 100, "Backup directory not found", error=self.error)
                 return False
         except Exception as e:
             self.error = f"Error checking backup directory: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            self._notify_progress("restoring", 100, "Error checking backup directory", error=self.error)
             return False
             
         try:
             # List all files and directories in backup
+            self._notify_progress("restoring", 10, "Scanning backup directory...")
             items = uos.listdir(self.backup_dir)
             if not items:
                 self.error = "Backup directory is empty"
                 logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+                self._notify_progress("restoring", 100, "Backup directory is empty", error=self.error)
                 return False
                 
             # Process each item in the backup directory
-            for item_name in items:
+            total_items = len(items)
+            for i, item_name in enumerate(items):
+                progress = 20 + int((i / total_items) * 70)  # 20-90% for file restoration
+                self._notify_progress("restoring", progress, f"Restoring {item_name}...")
                 source_path = f"{self.backup_dir.rstrip('/')}/{item_name}"
                 dest_path = f"/{item_name}"
                 
@@ -1122,14 +1231,16 @@ class FirmwareUpdater:
                     
                 # Yield to prevent blocking for too long
                 await asyncio.sleep(0)
-                
+                    
             logger.info("System successfully restored from backup", log_to_file=True)
+            self._notify_progress("restoring", 100, "System successfully restored from backup")
             self.remove_applying_flag()
             return True
             
         except Exception as e:
             self.error = f"System restore process failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            self._notify_progress("restoring", 100, "System restore failed", error=self.error)
             self.remove_applying_flag()  # Remove flag even on failure
             return False
 

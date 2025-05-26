@@ -1,6 +1,5 @@
 import time
-from .manager_logger import Logger
-from .manager_config import ConfigManager
+import lib.coresys.logger as logger
 from .manager_wifi import WiFiManager
 from .manager_tasks import TaskManager, TaskEvent
 import uasyncio as asyncio
@@ -10,7 +9,7 @@ class NetworkManager:
     
     def __init__(self, system_manager):
         self._system = system_manager
-        self._log = system_manager.log
+        # self._log = system_manager.log
         self._task_manager = system_manager.task_manager
         self._wifi_task_id = "wifi_update_task"
         self._is_up_called = False
@@ -19,7 +18,7 @@ class NetworkManager:
         """Bring network connection up."""
         wifi = self._system.ensure_service('wifi')
         if not wifi:
-            self._log.warning("NetworkManager: Cannot connect - WiFi configuration missing")
+            logger.warning("NetworkManager: Cannot connect - WiFi configuration missing")
             return False
             
         # Only start the task if not already running
@@ -32,7 +31,7 @@ class NetworkManager:
                 description="WiFi Update Loop",
                 is_coroutine=False
             )
-            self._log.info("NetworkManager: WiFi update task running")
+            logger.info("NetworkManager: WiFi update task running")
         
         self._is_up_called = True
         return True
@@ -50,17 +49,17 @@ class NetworkManager:
         # Disconnect WiFi interface
         if wifi.is_connected():
             wifi.disconnect()
-            self._log.info("NetworkManager: WiFi disconnected")
+            logger.info("NetworkManager: WiFi disconnected")
         return True
         
     async def wait_until_up(self, timeout_ms=60000):
         """Wait for network to come up with timeout."""
         wifi = self._system.ensure_service('wifi')
         if not wifi:
-            self._log.warning("NetworkManager: Cannot wait - WiFi configuration missing")
+            logger.warning("NetworkManager: Cannot wait - WiFi configuration missing")
             return False
             
-        self._log.info(f"NetworkManager: Waiting for network connection (timeout: {timeout_ms}ms)")
+        logger.info(f"NetworkManager: Waiting for network connection (timeout: {timeout_ms}ms)")
         
         # Ensure WiFi task is running
         if not self._is_up_called:
@@ -70,11 +69,11 @@ class NetworkManager:
         start_time = time.ticks_ms()
         while not wifi.is_connected():
             if time.ticks_diff(time.ticks_ms(), start_time) > timeout_ms:
-                self._log.warning("NetworkManager: Connection timed out")
+                logger.warning("NetworkManager: Connection timed out")
                 return False
             await asyncio.sleep_ms(250)
         
-        self._log.info(f"NetworkManager: Connected, IP: {wifi.get_ip()}")
+        logger.info(f"NetworkManager: Connected, IP: {wifi.get_ip()}")
         return True
         
     def is_up(self):
@@ -106,13 +105,13 @@ class SystemManager:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, device_name="Unnamed Device", wifi_ssid=None, wifi_password=None, debug_level=0):
+    def __init__(self, device_name="Unnamed Device", wifi_ssid=None, wifi_password=None):
         # We only want to initialize instance variables once
         if not hasattr(self, '_instance_vars_initialized'):
             self._instance_vars_initialized = True
             
             # Initialize components with defaults to avoid None issues
-            self._log = Logger(debug_level)  # Initialize with default debug level
+            # self._log = Logger(debug_level)  # Initialize with default debug level
             
             # Store injected configuration values
             self._device_name = device_name
@@ -121,7 +120,7 @@ class SystemManager:
             
             # Services registry  
             self._services = {}
-            self._services['log'] = self._log
+            # self._services['log'] = logger # ??
             
             # Initialize task manager
             self._task_manager = TaskManager()
@@ -140,18 +139,18 @@ class SystemManager:
     def _on_task_event(self, event):
         """Handle task lifecycle events."""
         if event.event_type == TaskEvent.TASK_FAILED:
-            self._log.error(f"SystemManager: Task {event.task_id} failed with error: {event.error}")
+            logger.error(f"SystemManager: Task {event.task_id} failed with error: {event.error}")
         elif event.event_type == TaskEvent.TASK_COMPLETED:
-            self._log.debug(f"SystemManager: Task {event.task_id} completed")
+            logger.debug(f"SystemManager: Task {event.task_id} completed")
         elif event.event_type == TaskEvent.TASK_STARTED:
-            self._log.debug(f"SystemManager: Task {event.task_id} started")
+            logger.debug(f"SystemManager: Task {event.task_id} started")
         elif event.event_type == TaskEvent.TASK_STOPPED:
-            self._log.debug(f"SystemManager: Task {event.task_id} stopped")
+            logger.debug(f"SystemManager: Task {event.task_id} stopped")
         
     def register_service(self, name, service_instance):
         """Register a service with the system manager."""
         self._services[name] = service_instance
-        self._log.info(f"SystemManager: Registered service '{name}'")
+        logger.info(f"SystemManager: Registered service '{name}'")
         return service_instance
         
     def get_service(self, name):
@@ -175,23 +174,23 @@ class SystemManager:
         """Initialize WiFi service on demand."""
         if self._wifi_ssid and self._wifi_password:
             self._services['wifi'] = WiFiManager(self._wifi_ssid, self._wifi_password, self._device_name)
-            self._log.info("SystemManager: WiFi manager initialized")
+            logger.info("SystemManager: WiFi manager initialized")
             return self._services['wifi']
         else:
-            self._log.info("SystemManager: WiFi not initialized (no credentials)")
+            logger.info("SystemManager: WiFi not initialized (no credentials)")
             return None
             
     def init(self):
         """Initialize system components. With the new design, this is lighter weight."""
         # Prevent re-initialization of components
         if self._initialized:
-            self._log.info("SystemManager: Already initialized, skipping")
+            logger.info("SystemManager: Already initialized, skipping")
             return self
             
         # Log device name
-        self._log.info(f"SystemManager: Device name: {self._device_name}")
+        logger.info(f"SystemManager: Device name: {self._device_name}")
         
-        self._log.info(f"SystemManager: Initialization complete. Available services: {', '.join(self._services.keys())}")
+        logger.info(f"SystemManager: Initialization complete. Available services: {', '.join(self._services.keys())}")
         self._initialized = True
         return self
    
@@ -229,10 +228,10 @@ class SystemManager:
         return self._task_manager.get_all_tasks()
     
     # Properties to access component instances
-    @property
-    def log(self):
-        """Access the logger instance."""
-        return self._log
+    # @property
+    # def log(self):
+    #     """Access the logger instance."""
+    #     return logger
         
     @property
     def network(self):
