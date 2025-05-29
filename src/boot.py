@@ -14,17 +14,12 @@ device_name = sys_config.get("DEVICE", "NAME", "micropython-device")
 wifi_ssid = sys_config.get("WIFI", "SSID", None)
 wifi_password = sys_config.get("WIFI", "PASS", None)
 network_timeout_ms = sys_config.get("FIRMWARE", "NETWORK_TIMEOUT_MS", 60000)
-# return device_model, device_name, wifi_ssid, wifi_password, network_timeout_ms
 system = SystemManager(
     device_name=device_name,
     wifi_ssid=wifi_ssid, 
     wifi_password=wifi_password
     )
-    # return system
 
-# Initialize the system manager with injected values
-
-# led_pin = machine.Pin('LED', machine.Pin.OUT)
 
 def create_firmware_updater():
     """Create and initialize firmware updater based on configuration"""
@@ -38,12 +33,13 @@ def create_firmware_updater():
         max_redirects = sys_config.get("FIRMWARE", "MAX_REDIRECTS", 10)
         update_on_boot = sys_config.get("FIRMWARE", "UPDATE_ON_BOOT", True)
         max_failure_attempts = sys_config.get("FIRMWARE", "MAX_FAILURE_ATTEMPTS", 3)
-        
+
+
         # Define progress callback for boot process
-        def boot_progress_callback(stage, progress_percent, message, **kwargs):
+        def boot_progress_callback(stage, progress_percent, message, error):
             logger.info(f"Progress_CB: [{stage.upper()}] {progress_percent}% - {message}", log_to_file=True)
-            if kwargs.get('error'):
-                logger.error(f"Progress_CB: Error in {stage}: {kwargs['error']}", log_to_file=True)
+            if error:
+                logger.error(f"Progress_CB: Error in {stage}: {error}", log_to_file=True)
         
         # Create updater with all injected values (singleton handles existing instance automatically)
         updater = FirmwareUpdater(
@@ -169,8 +165,13 @@ async def check_update_on_boot():
     
     # Step 2: Check if system was interrupted during update application
     logger.info("Boot: Step 2 - Checking for interrupted update...", log_to_file=True)
-    if updater.check_applying_flag_exists():
-        await restore_system_from_backup(updater)
+    if updater.was_interrupted_during_applying():
+        logger.info("Boot: Step 2A - Restoring system from backup...", log_to_file=True)
+        success = await updater.restore_from_backup()
+        if success:
+            logger.info("Boot: System successfully restored from backup.", log_to_file=True)
+        else:
+            logger.error(f"Boot: Failed to restore from backup: {updater.error}", log_to_file=True)
         return
     
     # Step 3: Check if update should be attempted (handles all flag logic internally)

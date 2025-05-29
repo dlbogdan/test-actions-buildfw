@@ -1,6 +1,6 @@
 """
 Logging module for embedded systems with minimal flash writes.
-This module provides global logging functionality without the complexity of singleton classes.
+This module provides global logging functionality.
 """
 
 import json

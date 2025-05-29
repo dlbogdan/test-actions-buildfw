@@ -21,6 +21,7 @@ max_failure_attempts = sys_config.get("FIRMWARE", "MAX_FAILURE_ATTEMPTS", 3)
 # Onboard LED (typically GP25 for Pico, or 'LED' for Pico W)
 led_pin = machine.Pin('LED', machine.Pin.OUT)
 
+
 def create_firmware_updater():
     """Create and initialize firmware updater based on configuration"""
     try:
@@ -30,10 +31,10 @@ def create_firmware_updater():
         
         
         # Define progress callback for main process
-        def main_progress_callback(stage, progress_percent, message, **kwargs):
+        def main_progress_callback(stage, progress_percent, message, error):
             print(f"Main: [{stage.upper()}] {progress_percent}% - {message}")
-            if kwargs.get('error'):
-                print(f"Main: Error in {stage}: {kwargs['error']}")
+            if error:
+                print(f"Main: Error in {stage}: {error}")
         
         # Create updater with all injected values (singleton handles existing instance automatically)
         updater = FirmwareUpdater(

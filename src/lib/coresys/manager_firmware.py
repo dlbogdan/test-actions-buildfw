@@ -8,9 +8,11 @@ import utarfile
 import machine
 import binascii
 import lib.coresys.logger as logger
+from enum import Enum, auto
 
 # logger = logger.Logger()
 led_pin = machine.Pin('LED', machine.Pin.OUT)
+
 
 class FirmwareUpdater:
     """Singleton firmware updater with progress callback support."""
@@ -92,7 +94,7 @@ class FirmwareUpdater:
         """Set or update the progress callback function."""
         self.progress_callback = callback
 
-    def _notify_progress(self, stage, progress_percent=0, message="", **kwargs):
+    def _notify_progress(self, stage, progress_percent=0, message="", error=None):
         """Notify progress callback if set."""
         if self.progress_callback:
             try:
@@ -100,7 +102,7 @@ class FirmwareUpdater:
                     stage=stage,
                     progress_percent=progress_percent,
                     message=message,
-                    **kwargs
+                    error=error
                 )
             except Exception as e:
                 logger.warning(f"Progress callback error: {e}", log_to_file=True)
@@ -205,57 +207,52 @@ class FirmwareUpdater:
         self.total_size = content_length
         self.bytes_read = 0
         
-        try:
-            remaining = content_length
-            last_progress_percent = 0
-            while remaining > 0:
-                chunk = await reader.read(min(self.chunk_size, remaining))
-                if not chunk: 
-                    break
-                hash_obj.update(chunk)
-                if store_in_memory and mem_buffer is not None:
-                    mem_buffer.extend(chunk)
-                elif file_handle:
-                    file_handle.write(chunk)
-                self.bytes_read += len(chunk)
-                led_pin.toggle()
-                remaining -= len(chunk)
-                
-                # Notify progress callback for download progress
-                current_progress = self.percent_complete()
-                if current_progress != last_progress_percent and current_progress % 5 == 0:  # Update every 5%
-                    self._notify_progress(
-                        stage="downloading",
-                        progress_percent=current_progress,
-                        message=f"Downloaded {self.bytes_read}/{self.total_size} bytes",
-                        bytes_downloaded=self.bytes_read,
-                        total_bytes=self.total_size
-                    )
-                    last_progress_percent = current_progress
-                
-                gc.collect()
-                await asyncio.sleep_ms(10)
-                
-            def hexdigest(data):
-                try: 
-                    return data.hexdigest() # there might be a micropython version when this will become available
-                except Exception: 
-                    # return ''.join('{:02x}'.format(byte) for byte in data.digest())
-                    return binascii.hexlify(data.digest()) # probably more efficient
-                    
-            computed_hash = hexdigest(hash_obj) if content_length > 0 else "NO_CONTENT_HASH"
-            
+        remaining = content_length
+        last_progress_percent = 0
+        while remaining > 0:
+            chunk = await reader.read(min(self.chunk_size, remaining))
+            if not chunk: 
+                break
+            hash_obj.update(chunk)
             if store_in_memory and mem_buffer is not None:
-                content_str = mem_buffer.decode('utf-8')
-                return content_str, computed_hash
-            else:
-                return None, computed_hash
-                
-        finally:
-            if file_handle:
+                mem_buffer.extend(chunk)
+            elif file_handle:
+                file_handle.write(chunk)
+            self.bytes_read += len(chunk)
+            led_pin.toggle()
+            remaining -= len(chunk)
+            
+            # Notify progress callback for download progress
+            current_progress = self.percent_complete()
+            if current_progress != last_progress_percent and current_progress % 5 == 0:  # Update every 5%
+                self._notify_progress(
+                    stage="downloading",
+                    progress_percent=current_progress,
+                    message=f"Downloaded {self.bytes_read}/{self.total_size} bytes"
+                )
+                last_progress_percent = current_progress
+            
+            gc.collect()
+            await asyncio.sleep_ms(10)
+        led_pin.off()
+        if file_handle:
                 file_handle.close()
 
-    async def _download_file(self, url, target_path, store_in_memory=False):
+        def hexdigest(data):
+            try: 
+                return data.hexdigest() # there might be a micropython version when this will become available
+            except Exception: 
+                return binascii.hexlify(data.digest()) # probably more efficient
+                
+        computed_hash = hexdigest(hash_obj) if content_length > 0 else "NO_CONTENT_HASH"
+        
+        if store_in_memory and mem_buffer is not None:
+            content_str = mem_buffer.decode('utf-8')
+            return content_str, computed_hash
+        else:
+            return None, computed_hash
+            
+    async def _download_file(self, url, target_path, store_in_memory=False)->tuple[str|None, str|bytes|None]:
         """Core download logic, assuming HTTPS. Optionally stores in memory."""
         self.total_size = 0
         self.bytes_read = 0
@@ -323,7 +320,7 @@ class FirmwareUpdater:
         return self.download_done
     
     # Flag management methods
-    def check_applying_flag_exists(self):
+    def was_interrupted_during_applying(self):
         """Check if system was interrupted during update application"""
         try:
             uos.stat(self.applying_flag_path)
@@ -459,7 +456,7 @@ class FirmwareUpdater:
         firmware_content_str, computed_sha256 = None, None 
         if firmware_download_result is not None:
             firmware_content_str, computed_sha256 = firmware_download_result
-
+            
         if self.error or not computed_sha256:
             errmsg = f"Firmware download failed: {self.error if self.error else 'No hash or download error'}"
             logger.error(f"FirmwareUpdater: {errmsg}", log_to_file=True)
@@ -521,21 +518,18 @@ class FirmwareUpdater:
         
         if is_newer_available:
             logger.info(f"Update available: {self.current_version} -> {latest_version_str}", log_to_file=True)
-            self._notify_progress("checking", 100, f"Update available: {self.current_version} -> {latest_version_str}", 
-                                current_version=self.current_version, latest_version=latest_version_str)
+            self._notify_progress("checking", 100, f"Update available: {self.current_version} -> {latest_version_str}")
         else:
             logger.info(f"Firmware is up-to-date: {latest_version_str}", log_to_file=True)
-            self._notify_progress("checking", 100, f"Firmware is up-to-date: {latest_version_str}", 
-                                current_version=self.current_version, latest_version=latest_version_str)
+            self._notify_progress("checking", 100, f"Firmware is up-to-date: {latest_version_str}")
             # If firmware is up-to-date, clean up any leftover update flags (only if they exist)
-            try:
-                uos.stat(self.update_flag_path)
+            if self.path_exists(self.update_flag_path):
                 self._cleanup_success_flags()  # Only clean up if flag actually exists
-            except OSError:
+            else:
                 pass  # No flag to clean up
             
         return is_newer_available, latest_version_str, latest_release
-            
+    
     async def download_update(self, latest_release):
         """Downloads the firmware update."""
         self.error = None
@@ -641,7 +635,7 @@ class FirmwareUpdater:
                 f_tar_out.write(chunk)
                 led_pin.toggle()
                 await asyncio.sleep(0) 
-                
+            led_pin.off()
             logger.info("Decompression successful.", log_to_file=True)
             print("Decompression successful.")
             return True
@@ -728,6 +722,7 @@ class FirmwareUpdater:
                                 led_pin.toggle()
                                 if not chunk: break
                                 outfile.write(chunk)
+                        led_pin.off()
                         logger.info(f"Extracted hash file: {target_path}", log_to_file=True)
                         # Parse the hash file after extracting it
                         self.hash_sums = self._parse_sha256sums_file(extract_to_dir)
@@ -742,7 +737,7 @@ class FirmwareUpdater:
                                 if not chunk: break
                                 hash_obj.update(chunk)
                                 outfile.write(chunk)
-                        
+                        led_pin.off()
                         # Verify the hash if we have hash_sums
                         if self.hash_sums:
                             # Convert the hash_obj to a hex string
@@ -951,11 +946,7 @@ class FirmwareUpdater:
         self._notify_progress("applying", 95, "Cleaning up temporary files...")
         await self._cleanup_temp_update_files(compressed_file_path, decompressed_tar_path, extract_to_dir, cleanup_archive=True, cleanup_extracted_dir=True)
         # Step 7.5: Remove __applying flag file
-        try:
-            uos.remove('/__applying')
-            logger.info("Removed /__applying flag file.", log_to_file=True)
-        except Exception as e:
-            logger.warning(f"Could not remove /__applying flag file: {str(e)}", log_to_file=True)
+        self.remove_applying_flag()
             
         logger.info("Step 9: System update successfully applied. Rebooting device...", log_to_file=True)
         
@@ -994,9 +985,8 @@ class FirmwareUpdater:
                         led_pin.toggle()
                         if not chunk: break
                         dst_f.write(chunk)
-                        # Yield more frequently for very large files if chunk_size is small
-                        # For now, yielding per chunk might be too much, let's do it after file completion or in dir loop.
-                    await asyncio.sleep(0) # Yield after file copy
+                        await asyncio.sleep(0) # Yield after each chunk
+                    led_pin.off()
             except Exception as e:
                 raise Exception(f"Failed to copy file {source_path} to {dest_path}: {str(e)}")
 
@@ -1058,9 +1048,6 @@ class FirmwareUpdater:
 
                 # Construct full destination path within backup_dir
                 dest_path = f"{backup_dir.rstrip('/')}{source_path}" 
-                # Example: item_name="main.py" -> source="/main.py", dest="/backup/main.py"
-                # Example: item_name="lib"     -> source="/lib",     dest="/backup/lib"
-
                 try:
                     await self._copy_item_recursive(source_path, dest_path)
                 except Exception as e_copy:
@@ -1076,92 +1063,116 @@ class FirmwareUpdater:
             self.error = f"Backup process failed: {str(e_main)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
+        
+    def is_existing_path_a_directory(self,path:str) -> bool:
+        try:
+            s_stat = uos.stat(path)
+            return (s_stat[0] & 0x4000) != 0
+        except OSError:
+            return False
+        
+        
+    def path_exists(self,path:str) -> bool:
+        try:
+            uos.stat(path)
+            return True
+        except OSError as e:
+            return False
+
+    async def _merge_directories_recursive(self, source_dir, dest_dir):
+        """Recursively merge source directory into destination directory using atomic operations"""
+        logger.info(f"Merging directory: {source_dir} -> {dest_dir}", log_to_file=True)
+        
+        try:
+            # Check if source directory exists
+            if not self.path_exists(source_dir):
+                logger.warning(f"Source directory doesn't exist: {source_dir}", log_to_file=True)
+                return True
+            
+            # Ensure destination directory exists
+            if not self.path_exists(dest_dir):
+                # Destination doesn't exist - we can just rename the entire directory atomically
+                logger.info(f"Destination directory doesn't exist, atomic move: {source_dir} -> {dest_dir}", log_to_file=True)
+                uos.rename(source_dir, dest_dir)
+                return True
+            
+            # Both directories exist, need to merge contents
+            source_items = uos.listdir(source_dir)
+            
+            for item_name in source_items:
+                source_item = f"{source_dir.rstrip('/')}/{item_name}"
+                dest_item = f"{dest_dir.rstrip('/')}/{item_name}"
+                
+                # Safety check - skip dangerous system paths when merging to root
+                if dest_dir == "/" and item_name in ["dev", "proc", "sys", "boot"]:
+                    logger.warning(f"Skipping system directory: {dest_item}", log_to_file=True)
+                    continue
+                
+                source_is_dir = self.is_existing_path_a_directory(source_item)
+                dest_exists = self.path_exists(dest_item)
+                dest_is_dir = dest_exists and self.is_existing_path_a_directory(dest_item)
+                
+                if not dest_exists:
+                    # Destination doesn't exist - atomic move
+                    logger.info(f"Atomic move: {source_item} -> {dest_item}", log_to_file=True)
+                    uos.rename(source_item, dest_item)
+                    
+                elif source_is_dir and dest_is_dir:
+                    # Both are directories - recurse
+                    logger.info(f"Recursing into directories: {source_item} -> {dest_item}", log_to_file=True)
+                    if not await self._merge_directories_recursive(source_item, dest_item):
+                        return False
+                    
+                elif not source_is_dir and not dest_is_dir:
+                    # Both are files - atomic replacement
+                    logger.info(f"Atomic file replacement: {source_item} -> {dest_item}", log_to_file=True)
+                    uos.rename(source_item, dest_item)
+                    
+                else:
+                    # Type mismatch (file->dir or dir->file) - atomic replacement
+                    logger.info(f"Type mismatch atomic replacement: {source_item} -> {dest_item}", log_to_file=True)
+                    uos.rename(source_item, dest_item)
+                
+                await asyncio.sleep(0)  # Yield control
+            
+            # Try to remove now-empty source directory
+            try:
+                uos.rmdir(source_dir)
+                logger.info(f"Removed empty source directory: {source_dir}", log_to_file=True)
+            except OSError as e:
+                # Directory not empty (shouldn't happen) or other error
+                logger.warning(f"Could not remove source directory {source_dir}: {e}", log_to_file=True)
+            
+            return True
+            
+        except Exception as e:
+            self.error = f"Directory merge failed for {source_dir} -> {dest_dir}: {str(e)}"
+            logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
+            return False
 
     async def _move_from_update_to_root(self, update_source_dir): # Added update_source_dir parameter
-        step_msg = "Step 8: Moving updated files from /update to / ..." 
+        """Move files from update to root using recursive directory merging with atomic operations"""
+        step_msg = "Step 8: Moving updated files from /update to / using atomic operations..." 
         logger.info(step_msg, log_to_file=True)
         
-        # update_source_dir = "/update" # This is now passed as a parameter
         try:
-            update_source_dir_name = update_source_dir.strip('/')
-            # Check if update_source_dir exists and is a directory, and has content.
-            try:
-                uos.stat(update_source_dir) 
-            except OSError as e:
-                if e.args[0] == 2: # ENOENT
-                    warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
-                    logger.warning(warn_msg, log_to_file=True)
-                    return True # Nothing to move, so operation is vacuously successful.
-                else: # Other stat error
-                    self.error = f"Error accessing update source directory {update_source_dir}: {str(e)}"
-                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-                    return False
+            if not self.path_exists(update_source_dir):
+                warn_msg = f"Warning: Update source directory '{update_source_dir}' not found. Nothing to move."
+                logger.warning(warn_msg, log_to_file=True)
+                return True # Nothing to move, so operation is vacuously successful.
 
-            items_to_move = uos.listdir(update_source_dir)
-            if not items_to_move:
-                logger.info(f"Update source directory '{update_source_dir}' is empty. Nothing to move.", log_to_file=True)
-                # Attempt to remove the empty /update directory
-                try:
-                    await self._remove_dir_recursive(update_source_dir)
-                    logger.info(f"Removed empty update source directory: {update_source_dir}", log_to_file=True)
-                except Exception as e_rm_empty:
-                    logger.warning(f"Could not remove empty update source directory {update_source_dir}: {e_rm_empty}", log_to_file=True)
-                return True # No files to move, consider successful for this step.
-                 
-            for item_name in items_to_move:
-                source_item_path = f"{update_source_dir.rstrip('/')}/{item_name.lstrip('/')}"
-                dest_item_path = f"/{item_name.lstrip('/')}"
-
-                # If destination exists, remove it first
-                try:
-                    uos.stat(dest_item_path) # Check existence, raises OSError if not found
-                    # Item exists at destination, determine if file or directory
-                    s_stat_dest = uos.stat(dest_item_path) # Re-stat, first one was just for existence
-                    is_dir_dest = (s_stat_dest[0] & 0x4000) != 0
-                    if is_dir_dest:
-                        rm_msg = f"Removing existing directory at root: {dest_item_path}"
-                        logger.info(rm_msg, log_to_file=True)
-                        await self._remove_dir_recursive(dest_item_path)
-                    else:
-                        rm_msg = f"Removing existing file at root: {dest_item_path}"
-                        logger.info(rm_msg, log_to_file=True)
-                        uos.remove(dest_item_path)
-                except OSError as e:
-                    if e.args[0] == 2: # ENOENT (Error Number 2): File/dir not found
-                        pass # Destination doesn't exist, good to go for rename
-                    else:
-                        self.error = f"Error checking/removing destination {dest_item_path}: {str(e)}"
-                        logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-                        return False # Critical error
-
-                # Now attempt to rename/move the item
-                mv_msg = f"Moving: {source_item_path} to {dest_item_path}"
-                logger.info(mv_msg, log_to_file=True)
-                try:
-                    uos.rename(source_item_path, dest_item_path)
-                except Exception as e_rename:
-                    self.error = f"Failed to move {source_item_path} to {dest_item_path}: {str(e_rename)}"
-                    logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-                    return False # Critical error
-                await asyncio.sleep(0) # Yield between items
-
-            # Cleanup: Remove the now-empty /update directory.
-            # Other files like .tar.zlib, .tar, and __applying will be handled by _cleanup_temp_update_files
-            cleanup_msg = f"Cleaning up source update directory: {update_source_dir}..."
-            logger.info(cleanup_msg, log_to_file=True)
+            # Simply merge the update directory into root using recursive atomic operations
+            success = await self._merge_directories_recursive(update_source_dir, "/")
             
-            try:
-                await self._remove_dir_recursive(update_source_dir) 
-                logger.info(f"Removed source update directory: {update_source_dir}", log_to_file=True)
-            except Exception as e_rm_update:
-                 # Non-critical if this fails, as main move was done. Log as warning.
-                logger.warning(f"Failed to remove source update directory {update_source_dir} after move: {e_rm_update}", log_to_file=True)
+            if success:
+                logger.info("Atomic recursive merge completed successfully.", log_to_file=True)
+            else:
+                logger.error("Atomic recursive merge failed.", log_to_file=True)
+                
+            return success
             
-            final_msg = "File move from update to root completed successfully."
-            logger.info(final_msg, log_to_file=True)
-            return True
         except Exception as e_main_move:
-            self.error = f"File overwrite process failed: {str(e_main_move)}"
+            self.error = f"Atomic file move process failed: {str(e_main_move)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
 
