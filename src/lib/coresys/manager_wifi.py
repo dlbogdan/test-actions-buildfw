@@ -7,7 +7,7 @@ import lib.coresys.logger as logger
 # --- WiFi Management ---
 # class WiFiManager: ... (NO CHANGES NEEDED, connection check is non-blocking) ...
 class WiFiManager:
-    """Handles non-blocking WiFi connection and status monitoring."""
+    """Handles non-blocking Wi-Fi connection and status monitoring."""
     STATUS_DISCONNECTED = 0
     STATUS_CONNECTING = 1
     STATUS_CONNECTED = 2
@@ -28,7 +28,7 @@ class WiFiManager:
             self._wlan.active(False) # Start inactive
             network.hostname(self.hostname)
             logger.info("WiFiManager: WLAN interface initialized.")
-            # Set initial status based on whether credentials are provided
+            # Set an initial status based on whether credentials are provided
             if self.ssid:
                  self._status = WiFiManager.STATUS_DISCONNECTED
                  logger.info("WiFiManager: Ready to connect.")
@@ -49,7 +49,7 @@ class WiFiManager:
         if self._status == WiFiManager.STATUS_ERROR or not self.ssid:
             return # Cannot proceed if WLAN failed or no SSID
 
-        # Check current physical connection status
+        # Check the current physical connection status
         is_physically_connected = self._wlan.isconnected()
 
         if self._status == WiFiManager.STATUS_CONNECTED:
@@ -59,25 +59,21 @@ class WiFiManager:
                 self._ip_address = None
                 self._wlan.active(False) # Deactivate to ensure clean reconnect
                 self._last_attempt_time = time.ticks_ms() # Start retry timer
-            else:
-                # Still connected, maybe occasionally check IP just in case? (Optional)
-                pass
+            # else: still connected, no need to log
 
         elif self._status == WiFiManager.STATUS_CONNECTING:
             if is_physically_connected:
                 self._ip_address = self._wlan.ifconfig()[0]
-                logger.info(f"WiFiManager: Connected. IP: {self._ip_address}")
                 self._status = WiFiManager.STATUS_CONNECTED
             elif self._wlan.status() < 0 or self._wlan.status() >= 3: # Error codes like WRONG_PASSWORD, NO_AP_FOUND, CONN_FAIL
-                logger.error(f"WiFiManager: Connection failed. Status code: {self._wlan.status()}. Retrying later.")
+                logger.error(f"WiFiManager: Connection failed. Status code: {self._wlan.status()}.")
                 self._status = WiFiManager.STATUS_DISCONNECTED
                 self._wlan.active(False) # Deactivate
                 self._last_attempt_time = time.ticks_ms() # Start retry timer
-            # else: still connecting (status 1 or 2), just wait
+            # else: still connecting, no need to log
 
         elif self._status == WiFiManager.STATUS_DISCONNECTED:
             if self._can_attempt_connect():
-                logger.info(f"WiFiManager: Attempting to connect to '{self.ssid}'...")
                 self._last_attempt_time = time.ticks_ms()
                 try:
                     self._wlan.active(True)
@@ -89,7 +85,7 @@ class WiFiManager:
                     self._wlan.active(False) # Ensure it's off if connect failed badly
 
     def is_connected(self):
-        """Returns True if the WiFi is connected, False otherwise."""
+        """Returns True if the Wi-Fi is connected, False otherwise."""
         return self._status == WiFiManager.STATUS_CONNECTED
 
     def get_status(self):
@@ -105,7 +101,58 @@ class WiFiManager:
         return self._ip_address if self.is_connected() else None
 
     def disconnect(self):
-        """Disconnects the WiFi connection."""
+        """Disconnects the Wi-Fi connection."""
         if self._wlan:
             self._wlan.disconnect()
             self._wlan.active(False)
+
+    def connection_failed(self):
+        """Check if the last connection attempt failed.
+
+        Returns:
+            bool: True if connection failed, False otherwise
+        """
+        # Connection has failed if:
+        # 1. We were in a CONNECTING state, but now we're in DISCONNECTED state
+        # 2. We have attempted at least once (_last_attempt_time > 0)
+        # 3. We're in ERROR state
+        return (self._status == WiFiManager.STATUS_DISCONNECTED and 
+                self._last_attempt_time > 0 and 
+                self._wlan.status() >= 3)  # Status codes 3+ indicate connection failure
+
+    def reconnect(self):
+        """Force a reconnection attempt by resetting the retry timer.
+
+        This allows immediate retry instead of waiting for the normal interval.
+        """
+        if self._status == WiFiManager.STATUS_DISCONNECTED:
+            self._last_attempt_time = 0  # Reset timer to allow immediate attempt
+            logger.info("WiFiManager: Reconnection requested")
+
+    def get_signal_strength(self):
+        """Get the current signal strength (RSSI) if connected.
+
+        Returns:
+            int: Signal strength in dBm or None if not available
+        """
+        if not self.is_connected() or not self._wlan:
+            return None
+
+        try:
+            # Try the standard MicroPython approach first
+            rssi = self._wlan.status('rssi')
+            return rssi
+        except (ValueError, TypeError):
+            pass
+
+        return None
+
+    def get_ssid(self):
+        """Get the current connected SSID.
+
+        Returns:
+            str: The SSID of the connected network or None if not connected
+        """
+        if self.is_connected():
+            return self.ssid
+        return None

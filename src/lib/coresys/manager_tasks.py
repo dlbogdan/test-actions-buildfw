@@ -1,5 +1,6 @@
 import uasyncio as asyncio
 import time
+import lib.coresys.logger as logger
 
 class TaskEvent:
     """Event data for task lifecycle notifications."""
@@ -14,7 +15,7 @@ class TaskEvent:
         self.task_id = task_id        # Unique identifier for the task
         self.event_type = event_type  # Type of event (started, stopped, etc.)
         self.task_type = task_type    # Type of task (one-shot or periodic)
-        self.error = error            # Error if task failed
+        self.error = error            # Error if a task failed
         self.timestamp = time.time()  # When the event occurred
 
 class TaskManager:
@@ -29,7 +30,8 @@ class TaskManager:
         self._task_info = {}            # task_id -> task metadata
         self._listeners = []            # Event listeners
         self._next_task_id = 1          # For generating unique task IDs
-        
+        self.add_listener(self._on_task_event)
+
     def create_task(self, coro, task_id=None, description=""):
         """Create a one-shot task for a self-sustained coroutine.
         
@@ -45,7 +47,7 @@ class TaskManager:
             task_id = f"oneshot_{self._next_task_id}"
             self._next_task_id += 1
             
-        # Create task wrapper that handles completion and errors
+        # Create a task wrapper that handles completion and errors
         async def task_wrapper():
             try:
                 # Notify task started
@@ -58,7 +60,7 @@ class TaskManager:
                 # Run the actual coroutine
                 result = await coro
                 
-                # Notify task completed
+                # Notify a task completed
                 self._notify_event(TaskEvent(
                     task_id, 
                     TaskEvent.TASK_COMPLETED, 
@@ -112,7 +114,25 @@ class TaskManager:
         }
         
         return task_id
-        
+
+    @staticmethod
+    def func_is_coroutine(func):
+        """Check if a function is a coroutine.
+
+        Args:
+            func: The function to check
+
+        Returns:
+            bool: True if the function is a coroutine, False otherwise
+        """
+        # Check if it has __await__ attribute (works in most Pythons)
+       
+            # CO_ITERABLE_COROUTINE = 0x0080, but we check for async def functions
+        if hasattr(func, '__code__'):
+            return bool(func.__code__.co_flags & (0x0080 | 0x0200))
+        return False
+    
+
     def create_periodic_task(self, update_func, interval_ms=500, task_id=None, description="", is_coroutine=None):
         """Create a task that calls an update function periodically.
         
@@ -132,17 +152,22 @@ class TaskManager:
             self._next_task_id += 1
             
         # Is the update function a coroutine?
-        # First try the explicit parameter, then use a basic detection if None
+        # First try the explicit parameter, then use basic detection if None
         if is_coroutine is None:
-            # Simple detection - better compatibility with MicroPython
-            try:
-                # Check if it has __await__ attribute (works in most Pythons)
-                is_coroutine = hasattr(update_func, "__await__")
-            except Exception:
-                # If that fails, assume it's not a coroutine
-                is_coroutine = False
+            is_coroutine = self.func_is_coroutine(update_func)
+        if is_coroutine:
+            logger.debug(f"SystemManager: Task {task_id} is a coroutine")
+
+        # if is_coroutine is None:
+        #     # Simple detection - better compatibility with MicroPython
+        #     try:
+        #         # Check if it has __await__ attribute (works in most Pythons)
+        #         is_coroutine = hasattr(update_func, "__await__")
+        #     except Exception:
+        #         # If that fails, assume it's not a coroutine
+        #         is_coroutine = False
             
-        # Create periodic task wrapper
+        # Create a periodic task wrapper
         async def periodic_wrapper():
             try:
                 # Notify task started
@@ -152,7 +177,7 @@ class TaskManager:
                     TaskManager.TASK_PERIODIC
                 ))
                 
-                # Store flag for checking if we should continue running
+                # Store a flag for checking if we should continue running
                 task_info = self._task_info[task_id]
                 
                 # Run the update function periodically
@@ -246,11 +271,11 @@ class TaskManager:
                 task_info['running'] = True
                 return task_id
                 
-            # If the task is already running, just return the ID
+            # If the task is already running, so we simply return the ID
             if task_info['running']:
                 return task_id
                 
-        # If task doesn't exist or isn't a periodic task, create a new one
+        # If a task doesn't exist or isn't a periodic task, create a new one
         return self.create_periodic_task(
             update_func, 
             interval_ms=interval_ms, 
@@ -266,7 +291,7 @@ class TaskManager:
         For one-shot tasks, this cancels the task.
         
         Returns:
-            bool: True if task was found and stopped, False otherwise
+            bool: True if a task was found and stopped, False otherwise
         """
         if task_id not in self._tasks or task_id not in self._task_info:
             return False
@@ -274,7 +299,7 @@ class TaskManager:
         task_info = self._task_info[task_id]
         
         if task_info['type'] == TaskManager.TASK_PERIODIC:
-            # For periodic tasks, set running flag to False to stop the loop
+            # For periodic tasks, set a running flag as False to stop the loop
             task_info['running'] = False
             return True
         else:
@@ -287,7 +312,7 @@ class TaskManager:
         """Restart a stopped periodic task.
         
         Returns:
-            bool: True if task was found and restarted, False otherwise
+            bool: True if the task was found and restarted, False otherwise
         """
         if task_id not in self._task_info:
             return False
@@ -298,7 +323,7 @@ class TaskManager:
             return False  # Can only restart periodic tasks
             
         if task_id in self._tasks and not task_info['running']:
-            # Set running flag to True to restart the loop
+            # Set the running flag to True to restart the loop
             task_info['running'] = True
             return True
             
@@ -313,7 +338,7 @@ class TaskManager:
         """Check if a task is currently running.
         
         Returns:
-            bool: True if task exists and is running, False otherwise
+            bool: True if the task exists and is running, False otherwise
         """
         return (task_id in self._task_info and 
                 task_id in self._tasks and 
@@ -323,7 +348,7 @@ class TaskManager:
         """Get information about a task.
         
         Returns:
-            dict: Task metadata or None if task not found
+            dict: Task metadata or None if the task was not found
         """
         return self._task_info.get(task_id)
         
@@ -374,5 +399,17 @@ class TaskManager:
             try:
                 listener(event)
             except Exception:
-                # Don't let listener errors affect task management
-                pass 
+                # Don't let listener errors affect task management, just log it
+                logger.error(f"SystemManager: Error notifying listener: {listener}")
+
+    @staticmethod
+    def _on_task_event(event):
+        """Handle task lifecycle events."""
+        if event.event_type == TaskEvent.TASK_FAILED:
+            logger.error(f"SystemManager: Task {event.task_id} failed with error: {event.error}")
+        elif event.event_type == TaskEvent.TASK_COMPLETED:
+            logger.debug(f"SystemManager: Task {event.task_id} completed")
+        elif event.event_type == TaskEvent.TASK_STARTED:
+            logger.debug(f"SystemManager: Task {event.task_id} started")
+        elif event.event_type == TaskEvent.TASK_STOPPED:
+            logger.debug(f"SystemManager: Task {event.task_id} stopped")
