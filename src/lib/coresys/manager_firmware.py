@@ -439,7 +439,7 @@ class FirmwareUpdater:
             
 
         
-    async def _download_firmware(self, firmware_url, firmware_filename):
+    async def _download_firmware(self, firmware_url):
         """Download the firmware file."""
         self.download_done = False 
         self.download_started = False
@@ -627,13 +627,17 @@ class FirmwareUpdater:
                 await asyncio.sleep(0) 
             led_pin.off()
             return True
-            
+
         except Exception as e:
             self.error = f"Decompression failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
             return False
-            
+
         finally:
+            if f_zlib:
+                try: f_zlib.close()
+                except Exception as e_close:
+                    print(f"Error closing f_zlib: {e_close}")
             if d_stream: 
                 try: d_stream.close() 
                 except Exception as e_close: 
@@ -642,10 +646,8 @@ class FirmwareUpdater:
                 try: f_tar_out.close()
                 except Exception as e_close: 
                     print(f"Error closing f_tar_out: {e_close}")
-            if f_zlib:
-                try: f_zlib.close()
-                except Exception as e_close: 
-                    print(f"Error closing f_zlib: {e_close}")
+
+
 
     def _parse_sha256sums_file(self, extract_to_dir):
         """Parse the integrity.txt file into a dictionary."""
@@ -758,7 +760,7 @@ class FirmwareUpdater:
         
         processed_count = 0
         error_count = 0
-        tar = None
+        # tar = None
         
         try:
             self._mkdirs(extract_to_dir)
@@ -886,7 +888,7 @@ class FirmwareUpdater:
         logger.info("Creating /__applying flag file...", log_to_file=True)
         self._notify_progress("applying", 55, "Creating applying flag...")
         try:
-            with open('/__applying', 'w') as f:
+            with open('/__applying', 'w') as _:
                 pass # Create an empty file
             logger.info("Created /__applying flag file.", log_to_file=True)
         except Exception as e:

@@ -6,6 +6,7 @@ from lib.coresys.manager_system import SystemManager
 from lib.coresys.manager_firmware import FirmwareUpdater
 # from coresys.sysconfig import sys_config
 from lib.coresys.manager_config import ConfigManager
+from lib.coresys.manager_wifi import WiFiManager
 
 sys_config = ConfigManager("/system-config.json")
 device_model = sys_config.get("DEVICE", "MODEL", "generic")
@@ -77,40 +78,35 @@ async def main():
         device_name = sys_config.get("DEVICE", "NAME", "micropython-device")
         wifi_ssid = sys_config.get("WIFI", "SSID", None)
         wifi_password = sys_config.get("WIFI", "PASS", None)
-        
+        wifi= WiFiManager(ssid=wifi_ssid, password=wifi_password,hostname=device_name)
+
         # Initialize the system manager with injected values
         system = SystemManager(
             device_name=device_name,
-            wifi_ssid=wifi_ssid, 
-            wifi_password=wifi_password
-        )
-        
-        # Bring up network and wait for connection
-        print("Main: Starting network connection...")
-        system.network.up()
-        
-        # Wait for WiFi with timeout
-        if await system.network.wait_until_up(timeout_ms=60000):
-            print(f"Main: Network connected with IP: {system.network.get_ip()}")
-            
+            network_manager=wifi)
+
+        # Bring up WiFi and wait for connection
+        print("Main: Starting WiFi connection...")
+        await system.setup_network()
+
+        # Wait for connection with timeout
+
             # Check for firmware updates if network is connected
-            print("Main: Initializing firmware updater...")
-            firmware_updater = create_firmware_updater()
-            
-            if firmware_updater:
-                print("Main: Checking for firmware updates...")
-                update_available, new_version, release_info = await firmware_updater.check_update()
-                
-                if firmware_updater.error:
-                    print(f"Main: Update check failed: {firmware_updater.error}")
-                elif update_available:
-                    print(f"Main: Firmware update available: {new_version}")
-                else:
-                    print(f"Main: Firmware is up to date (version: {new_version})")
+        print("Main: Initializing firmware updater...")
+        firmware_updater = create_firmware_updater()
+
+        if firmware_updater:
+            print("Main: Checking for firmware updates...")
+            update_available, new_version, release_info = await firmware_updater.check_update()
+
+            if firmware_updater.error:
+                print(f"Main: Update check failed: {firmware_updater.error}")
+            elif update_available:
+                print(f"Main: Firmware update available: {new_version}")
             else:
-                print("Main: Firmware updater not available - check configuration")
+                print(f"Main: Firmware is up to date (version: {new_version})")
         else:
-            print("Main: Could not connect to network")
+            print("Main: Firmware updater not available - check configuration")
         
         # Main application loop
         print("Main: Entering main application loop")
@@ -123,10 +119,10 @@ async def main():
             
             # Wait a bit
             await asyncio.sleep(1)
-            
     except Exception as e:
-        print(f"Error: {e}")
-        # Don't try to use system.log here as it might be None if initialization failed
+    # Handle any exceptions here
+        print(f"Main: Fatal error: {e}")
+        machine.reset()
 
 if __name__ == "__main__":
     try:

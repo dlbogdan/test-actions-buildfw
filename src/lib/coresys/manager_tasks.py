@@ -183,6 +183,7 @@ class TaskManager:
                 # Run the update function periodically
                 while task_info['running']:
                     try:
+                        logger.trace(f"SystemManager: Task {task_id} update")
                         # Call the update function based on its type
                         if is_coroutine:
                             await update_func()
