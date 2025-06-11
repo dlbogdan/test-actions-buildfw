@@ -135,4 +135,4 @@ if __name__ == "__main__":
         logger.error(f"Boot: Unhandled exception in boot sequence: {e}", log_to_file=True)
     finally:
         logger.info("Boot: Main execution of boot.py finished.", log_to_file=True)
-        system.shutdown()
+        asyncio.run(system.shutdown())

@@ -25,9 +25,9 @@ class SystemManager:
         self._initialized = True
         self._network_manager = network_manager
 
-    def shutdown(self):
+    async def shutdown(self):
         """Destruct everything"""
-        self.cleanup()
+        await self.cleanup()
         # asyncio.new_event_loop()
 
     async def setup_network(self):
@@ -127,12 +127,12 @@ class SystemManager:
                 result.append(task_data)
         return result
 
-    def cleanup(self):
+    async def cleanup(self):
         """Clean up all services and prepare for shutdown."""
         logger.info("SystemManager: Cleaning up all services")
 
         # First, stop all tasks
-        self._task_manager.cancel_all_tasks()
+        await self._task_manager.cancel_all_tasks()
         self.network.down()
         self._initialized = False
         # self._connection_state = self.CONN_DISCONNECTED

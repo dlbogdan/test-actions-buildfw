@@ -153,11 +153,10 @@ class FirmwareUpdater:
             
         return host, port, path
             
-    async def _make_http_request(self, host, port, path):
+    async def _make_http_request(self, host, port, path,timeout=2):
         """Make an HTTPS request and return the connection and response status."""
         logger.info(f'Connecting to {host}:{port} for path {path[:50]}...', log_to_file=True)
-        reader, writer = await asyncio.open_connection(host, port, ssl=True)
-        
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port, ssl=True), timeout)
         headers = f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: MicroPython-Firmware-Updater/1.0\r\nConnection: close\r\n'
         if self.github_token:
             headers += f'Authorization: token {self.github_token}\r\n'
@@ -603,14 +602,14 @@ class FirmwareUpdater:
                 print(f"ERROR: {self.error}")
                 raise  # Re-raise to be caught by caller
     
-    async def _decompress_firmware(self, compressed_path, decompressed_path):
+    async def _decompress_firmware(self, compressed_path, decompressed_path)->bool:
         """Decompress the zlib-compressed firmware file."""
         logger.info(f"Decompressing {compressed_path} to {decompressed_path}...", log_to_file=True)
 
         f_zlib = None
         d_stream = None
         f_tar_out = None
-
+        result = True
         try:
             f_zlib = open(compressed_path, "rb")
             # Using positional arguments for DeflateIO: stream, format, wbits
@@ -626,28 +625,27 @@ class FirmwareUpdater:
                 led_pin.toggle()
                 await asyncio.sleep(0) 
             led_pin.off()
-            return True
+
 
         except Exception as e:
             self.error = f"Decompression failed: {str(e)}"
             logger.error(f"FirmwareUpdater: {self.error}", log_to_file=True)
-            return False
+            result = False
 
         finally:
             if f_zlib:
                 try: f_zlib.close()
                 except Exception as e_close:
                     print(f"Error closing f_zlib: {e_close}")
-            if d_stream: 
-                try: d_stream.close() 
-                except Exception as e_close: 
+            if d_stream:
+                try: d_stream.close()
+                except Exception as e_close:
                     print(f"Error closing d_stream: {e_close}")
             if f_tar_out:
                 try: f_tar_out.close()
-                except Exception as e_close: 
+                except Exception as e_close:
                     print(f"Error closing f_tar_out: {e_close}")
-
-
+        return result
 
     def _parse_sha256sums_file(self, extract_to_dir):
         """Parse the integrity.txt file into a dictionary."""

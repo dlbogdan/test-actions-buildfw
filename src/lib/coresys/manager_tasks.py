@@ -285,7 +285,7 @@ class TaskManager:
             is_coroutine=is_coroutine
         )
         
-    def stop_task(self, task_id):
+    async def stop_task(self, task_id):
         """Stop a task by its ID.
         
         For periodic tasks, this stops the loop elegantly.
@@ -330,10 +330,10 @@ class TaskManager:
             
         return False
         
-    def cancel_all_tasks(self):
+    async def cancel_all_tasks(self):
         """Cancel all running tasks."""
         for task_id in list(self._tasks.keys()):
-            self.stop_task(task_id)
+            await self.stop_task(task_id)
             
     def is_task_running(self, task_id):
         """Check if a task is currently running.
